@@ -1,0 +1,206 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --aqar-primary: #26478D;
+    --aqar-secondary: #97A5BA;
+    --aqar-dark-bg: #0A0E1A;
+    --aqar-dark-alt: #1A1F2E;
+    font-family: 'IBM Plex Sans Arabic', 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  }
+
+  body {
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    overflow-x: hidden;
+  }
+}
+
+.font-mono-num {
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.glass-surface {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.dark .glass-surface {
+  background: rgba(19, 25, 43, 0.78);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.glass-sidebar {
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.dark .glass-sidebar {
+  background: rgba(12, 17, 30, 0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* Custom subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(151, 165, 186, 0.35);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(151, 165, 186, 0.55);
+}
+
+@keyframes aqarFadeScale {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes aqarSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-aqar-fade-scale {
+  animation: aqarFadeScale 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-aqar-slide-up {
+  animation: aqarSlideUp 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-aqar-fade-scale,
+  .animate-aqar-slide-up {
+    animation: none !important;
+  }
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    color-scheme: light !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    font-size: 11.5px;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only-header {
+    display: flex !important;
+  }
+
+  .dark,
+  .dark body,
+  .dark main,
+  .dark .glass-surface,
+  .glass-surface {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    box-shadow: none !important;
+  }
+
+  .dark .glass-surface {
+    border-color: #cbd5e1 !important;
+  }
+
+  .dark [class*="text-slate-1"],
+  .dark [class*="text-slate-2"],
+  .dark [class*="text-slate-3"],
+  .dark [class*="text-slate-4"],
+  .dark [class*="text-slate-5"] {
+    color: #1e293b !important;
+  }
+
+  .dark [class*="border-white"] {
+    border-color: #cbd5e1 !important;
+  }
+
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+
+  .overflow-x-auto,
+  .overflow-y-auto,
+  .overflow-hidden {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    font-size: 10.5px !important;
+  }
+
+  thead {
+    display: table-header-group !important;
+    background: #f8fafc !important;
+    color: #334155 !important;
+  }
+
+  th,
+  td {
+    border-color: #e2e8f0 !important;
+    padding: 6px 8px !important;
+  }
+
+  tr,
+  section,
+  .recharts-wrapper,
+  .print-avoid-break {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  .print-only-panel {
+    box-shadow: none !important;
+    border: 1px solid #cbd5e1 !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
+  }
+}
