@@ -20,6 +20,10 @@ import {
   ChevronDown,
   Globe,
   Settings,
+  Lock,
+  Sparkles,
+  Archive,
+  MessageSquareText,
 } from 'lucide-react';
 import { NavSection, PrimaryNavSection, useAqar } from '../context/AqarContext';
 import { formatDateTime } from '../utils/formatters';
@@ -41,6 +45,7 @@ export function LayoutShell({ children }: LayoutShellProps) {
     activeNav,
     setActiveNav,
     wsStatus,
+    isBrowserOnline,
     isOfflineSimulated,
     toggleOfflineSimulation,
     offlineQueue,
@@ -49,6 +54,7 @@ export function LayoutShell({ children }: LayoutShellProps) {
     toasts,
     dismissToast,
     mutate,
+    openOnboarding,
   } = useAqar();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -70,6 +76,8 @@ export function LayoutShell({ children }: LayoutShellProps) {
     { id: 'reports', labelAr: 'التقارير', labelEn: 'Reports', icon: BarChart3, ownerAllowed: true },
     { id: 'team', labelAr: 'فريق العمل', labelEn: 'Team & Roles', icon: UserCog },
     { id: 'documents', labelAr: 'المستندات', labelEn: 'Documents', icon: FolderOpen, ownerAllowed: true },
+    { id: 'archive', labelAr: 'الأرشيف الذكي', labelEn: 'Smart Archive', icon: Archive, ownerAllowed: true },
+    { id: 'templates', labelAr: 'قوالب التواصل', labelEn: 'Templates', icon: MessageSquareText },
     { id: 'settings', labelAr: 'الإعدادات', labelEn: 'Settings', icon: Settings },
   ];
 
@@ -78,7 +86,10 @@ export function LayoutShell({ children }: LayoutShellProps) {
     return true;
   });
 
-  const activeNavMeta = navItems.find((n) => n.id === activeNav) || navItems[0];
+  const activeNavMeta =
+    activeNav === 'about'
+      ? navItems.find((n) => n.id === 'settings') || navItems[0]
+      : navItems.find((n) => n.id === activeNav) || navItems[0];
 
   const unreadNotifications = useMemo(() => {
     if (!state || !currentUser) return [];
@@ -142,12 +153,28 @@ export function LayoutShell({ children }: LayoutShellProps) {
       <aside className="hidden lg:flex flex-col w-64 shrink-0 border-e border-slate-200 dark:border-white/10 glass-sidebar sticky top-0 h-screen no-print">
         {/* Brand Zone */}
         <div className="px-5 h-16 flex items-center justify-between border-b border-slate-200 dark:border-white/10">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-[#26478D] text-white flex items-center justify-center font-bold text-sm">
-              A+
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#26478D] to-[#0A0E1A] text-white flex items-center justify-center font-bold text-sm overflow-hidden shrink-0 border border-white/15 shadow-sm">
+              {state?.settings.logoDataUrl ? (
+                <img
+                  src={state.settings.logoDataUrl}
+                  alt="Logo"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <img
+                  src="/assets/aistudio/Aqar_plus_8de53ba4.svg"
+                  alt="AqarPlus"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-contain p-1"
+                />
+              )}
             </div>
-            <div>
-              <div className="text-base font-bold tracking-tight whitespace-nowrap">AqarPlus</div>
+            <div className="min-w-0">
+              <div className="text-base font-bold tracking-tight truncate">
+                {state?.settings.nameAr && state.settings.logoDataUrl ? state.settings.nameAr : 'AqarPlus'}
+              </div>
             </div>
           </div>
           <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap">
@@ -196,12 +223,26 @@ export function LayoutShell({ children }: LayoutShellProps) {
 
       {/* Main Content Wrapper */}
       <div className="flex-1 flex flex-col min-w-0 pb-16 lg:pb-0">
-        {/* Top Bar */}
-        <header className="sticky top-0 z-30 h-16 px-4 lg:px-6 border-b border-slate-200 dark:border-white/10 glass-surface flex items-center justify-between gap-4 no-print">
+        {/* Top Bar (Compact 56px mobile / 64px desktop to honor 15% sticky viewport budget) */}
+        <header className="sticky top-0 z-30 h-14 lg:h-16 px-3 lg:px-6 border-b border-slate-200 dark:border-white/10 glass-surface flex items-center justify-between gap-3 no-print">
           {/* Active Page Title */}
           <div className="flex items-center gap-3 min-w-0">
-            <div className="lg:hidden w-8 h-8 rounded-lg bg-[#26478D] text-white flex items-center justify-center font-bold text-xs shrink-0">
-              A+
+            <div className="lg:hidden w-8 h-8 rounded-lg bg-gradient-to-br from-[#26478D] to-[#0A0E1A] text-white flex items-center justify-center font-bold text-xs shrink-0 overflow-hidden border border-white/15">
+              {state?.settings.logoDataUrl ? (
+                <img
+                  src={state.settings.logoDataUrl}
+                  alt="Logo"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <img
+                  src="/assets/aistudio/Aqar_plus_8de53ba4.svg"
+                  alt="AqarPlus"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-contain p-1"
+                />
+              )}
             </div>
             <h1 className="text-base lg:text-lg font-semibold truncate">
               {lang === 'ar' ? activeNavMeta.labelAr : activeNavMeta.labelEn}
@@ -269,13 +310,13 @@ export function LayoutShell({ children }: LayoutShellProps) {
             <button
               onClick={toggleOfflineSimulation}
               title={lang === 'ar' ? 'تبديل وضع الاتصال / العمل دون إنترنت' : 'Toggle Online / Offline Mode'}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                isOfflineSimulated || wsStatus === 'offline'
+              className={`inline-flex items-center gap-1.5 px-2.5 min-h-[38px] lg:min-h-[36px] rounded-xl text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                !isBrowserOnline || isOfflineSimulated || wsStatus === 'offline'
                   ? 'border-amber-300 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-300'
                   : 'border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.04] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/10'
               }`}
             >
-              {isOfflineSimulated || wsStatus === 'offline' ? (
+              {!isBrowserOnline || isOfflineSimulated || wsStatus === 'offline' ? (
                 <>
                   <WifiOff className="w-3.5 h-3.5" />
                   <span className="hidden sm:inline">{lang === 'ar' ? 'دون إنترنت' : 'Offline'}</span>
@@ -345,6 +386,30 @@ export function LayoutShell({ children }: LayoutShellProps) {
                         </button>
                       );
                     })}
+                  </div>
+                  <div className="p-2 border-t border-slate-100 dark:border-white/10 grid grid-cols-2 gap-1.5 bg-slate-50/70 dark:bg-white/[0.02]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUserMenuOpen(false);
+                        openOnboarding('splash', true);
+                      }}
+                      className="flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-medium border border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
+                    >
+                      <Lock className="w-3.5 h-3.5 text-[#26478D] dark:text-blue-400" />
+                      <span>{lang === 'ar' ? 'قفل PIN' : 'Lock PIN'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUserMenuOpen(false);
+                        openOnboarding('company', false);
+                      }}
+                      className="flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-medium bg-[#26478D]/10 text-[#26478D] dark:text-blue-300 hover:bg-[#26478D]/20 cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>{lang === 'ar' ? 'معالج البداية' : 'Setup Wizard'}</span>
+                    </button>
                   </div>
                 </div>
               )}
@@ -457,11 +522,29 @@ export function LayoutShell({ children }: LayoutShellProps) {
               <div className="font-mono-num">{formatDateTime(new Date().toISOString(), lang)}</div>
             </div>
           </div>
+          {/* Graceful Offline Resilience Banner */}
+          {(!isBrowserOnline || isOfflineSimulated) && (
+            <div className="mb-4 px-4 py-2.5 rounded-2xl border border-amber-300/70 dark:border-amber-500/30 bg-amber-50/90 dark:bg-amber-500/10 flex flex-wrap items-center justify-between gap-2 text-xs no-print">
+              <div className="flex items-center gap-2 text-amber-800 dark:text-amber-200 font-medium">
+                <WifiOff className="w-4 h-4 shrink-0" />
+                <span>
+                  {lang === 'ar'
+                    ? 'أنت تعمل حالياً من النسخة المحفوظة دون إنترنت — سيتم حفظ التعديلات ومزامنتها تلقائياً عند عودة الشبكة.'
+                    : 'Working offline from cached workspace — edits queue safely and sync once reconnected.'}
+                </span>
+              </div>
+              {offlineQueue.length > 0 && (
+                <span className="font-mono-num text-[11px] font-bold text-amber-700 dark:text-amber-300">
+                  {lang === 'ar' ? `${offlineQueue.length} عمليات بالانتظار` : `${offlineQueue.length} queued`}
+                </span>
+              )}
+            </div>
+          )}
           {children}
         </main>
       </div>
 
-      {/* Mobile Bottom Navigation (Horizontal Scrollable 9-item Dock) */}
+      {/* Mobile Bottom Navigation (Thumb-Zone >= 44px height items) */}
       <nav className="lg:hidden fixed bottom-0 inset-x-0 z-30 h-14 border-t border-slate-200 dark:border-white/10 glass-sidebar flex items-center gap-1 overflow-x-auto px-2 no-print">
         {visibleNav.map((item) => {
           const Icon = item.icon;
@@ -470,7 +553,7 @@ export function LayoutShell({ children }: LayoutShellProps) {
             <button
               key={item.id}
               onClick={() => setActiveNav(item.id)}
-              className={`shrink-0 flex flex-col items-center justify-center gap-0.5 px-2.5 py-1 rounded-lg text-[10px] font-medium cursor-pointer ${
+              className={`shrink-0 min-h-[44px] min-w-[60px] flex flex-col items-center justify-center gap-0.5 px-2.5 py-1 rounded-xl text-[10px] font-medium cursor-pointer transition-colors ${
                 isActive ? 'text-[#26478D] dark:text-blue-400 bg-[#26478D]/10 dark:bg-blue-400/10' : 'text-slate-500 dark:text-slate-400'
               }`}
             >

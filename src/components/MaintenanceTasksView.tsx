@@ -4,6 +4,8 @@ import { useAqar } from '../context/AqarContext';
 import { MaintenanceTicket, TaskItem, TaskStatus, TicketPriority, TicketStatus } from '../types/aqar';
 import { formatSar } from '../utils/formatters';
 import { PrintViewButton } from './PrintViewButton';
+import { MoveToArchiveButton } from './MoveToArchiveButton';
+import { CreateTaskQuickButton } from './CreateTaskQuickModal';
 
 export function MaintenanceTasksView() {
   const { state, currentUser, lang, hasPermission, mutate, pushToast } = useAqar();
@@ -192,6 +194,12 @@ export function MaintenanceTasksView() {
 
         <div className="flex flex-wrap items-center gap-2">
           <PrintViewButton />
+          <CreateTaskQuickButton
+            defaultType="صيانة"
+            relatedLabel="مركز الصيانة والمهام"
+            label={lang === 'ar' ? 'إسناد ذكي لمهمة' : 'Smart Assign Task'}
+            compact
+          />
           {hasPermission('manage_maintenance') && tab === 'tickets' && (
             <button
               onClick={() => setShowNewTicket(true)}
@@ -249,21 +257,32 @@ export function MaintenanceTasksView() {
                     {linkedExp && ` · مصروف ${linkedExp.expenseNumber} (${linkedExp.approvalStatus})`}
                   </div>
                   {hasPermission('execute_maintenance') && (
-                    <button
-                      onClick={() => {
-                        setEditingTicket(tkt);
-                        setTicketUpdate({
-                          status: tkt.status,
-                          diagnosis: tkt.diagnosis || '',
-                          actualCost: tkt.actualCost || tkt.estimatedCost,
-                          createExpenseInvoiceNo: '',
-                        });
-                      }}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#26478D] text-white text-[11px] font-semibold cursor-pointer"
-                    >
-                      <Wrench className="w-3 h-3" />
-                      <span>تحديث التنفيذ والتكلفة</span>
-                    </button>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        onClick={() => {
+                          setEditingTicket(tkt);
+                          setTicketUpdate({
+                            status: tkt.status,
+                            diagnosis: tkt.diagnosis || '',
+                            actualCost: tkt.actualCost || tkt.estimatedCost,
+                            createExpenseInvoiceNo: '',
+                          });
+                        }}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#26478D] text-white text-[11px] font-semibold cursor-pointer"
+                      >
+                        <Wrench className="w-3 h-3" />
+                        <span>تحديث التنفيذ والتكلفة</span>
+                      </button>
+                      {!tkt.archivedAt && (tkt.status === 'مكتمل' || tkt.status === 'مغلق' || hasPermission('manage_properties')) && (
+                        <MoveToArchiveButton
+                          category="tickets"
+                          entityId={tkt.id}
+                          targetKind="ticket"
+                          entityLabel={tkt.ticketNumber}
+                          compact
+                        />
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
@@ -424,9 +443,21 @@ export function MaintenanceTasksView() {
                 </div>
                 <h3 className="text-base font-bold mt-0.5">{activeTask.title}</h3>
               </div>
-              <button onClick={() => setSelectedTask(null)} className="cursor-pointer">
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                {!activeTask.archivedAt && hasPermission('execute_maintenance') && (
+                  <MoveToArchiveButton
+                    category="tickets"
+                    entityId={activeTask.id}
+                    targetKind="task"
+                    entityLabel={activeTask.title}
+                    compact
+                    onArchived={() => setSelectedTask(null)}
+                  />
+                )}
+                <button onClick={() => setSelectedTask(null)} className="cursor-pointer">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             <p className="text-xs text-slate-600 dark:text-slate-300">{activeTask.description}</p>

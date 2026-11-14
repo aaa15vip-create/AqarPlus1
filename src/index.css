@@ -26,27 +26,41 @@
 }
 
 .glass-surface {
-  background: rgba(255, 255, 255, 0.88);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: rgba(255, 255, 255, 0.86);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 
 .dark .glass-surface {
-  background: rgba(19, 25, 43, 0.78);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  background: rgba(19, 25, 43, 0.76);
+  backdrop-filter: blur(22px) saturate(135%);
+  -webkit-backdrop-filter: blur(22px) saturate(135%);
+  box-shadow: 0 8px 28px -12px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .glass-sidebar {
   background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
 }
 
 .dark .glass-sidebar {
-  background: rgba(12, 17, 30, 0.92);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: rgba(11, 16, 29, 0.92);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+}
+
+.glass-card-interactive {
+  transition: transform 170ms cubic-bezier(0.22, 1, 0.36, 1), border-color 170ms ease, box-shadow 170ms ease;
+}
+
+.glass-card-interactive:hover {
+  transform: translateY(-2px);
+}
+
+.glass-card-interactive:active {
+  transform: scale(0.988);
 }
 
 /* Custom subtle scrollbars */
@@ -79,10 +93,21 @@
   }
 }
 
+@keyframes aqarHeroExpand {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
 @keyframes aqarSlideUp {
   from {
     opacity: 0;
-    transform: translateY(20px);
+    transform: translateY(16px);
   }
   to {
     opacity: 1;
@@ -90,18 +115,63 @@
   }
 }
 
+@keyframes aqarShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.aqar-skeleton {
+  background: linear-gradient(90deg, rgba(226, 232, 240, 0.65) 25%, rgba(241, 245, 249, 0.95) 50%, rgba(226, 232, 240, 0.65) 75%);
+  background-size: 200% 100%;
+  animation: aqarShimmer 1.35s ease-in-out infinite;
+}
+
+.dark .aqar-skeleton {
+  background: linear-gradient(90deg, rgba(30, 41, 59, 0.55) 25%, rgba(51, 65, 85, 0.72) 50%, rgba(30, 41, 59, 0.55) 75%);
+  background-size: 200% 100%;
+  animation: aqarShimmer 1.35s ease-in-out infinite;
+}
+
 .animate-aqar-fade-scale {
-  animation: aqarFadeScale 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: aqarFadeScale 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-aqar-hero {
+  animation: aqarHeroExpand 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .animate-aqar-slide-up {
-  animation: aqarSlideUp 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: aqarSlideUp 190ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes aqarRipple {
+  from {
+    opacity: 0.42;
+    transform: scale(0.2);
+  }
+  to {
+    opacity: 0;
+    transform: scale(2.4);
+  }
+}
+
+.animate-aqar-ripple {
+  animation: aqarRipple 480ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .animate-aqar-fade-scale,
-  .animate-aqar-slide-up {
+  .animate-aqar-hero,
+  .animate-aqar-slide-up,
+  .animate-aqar-ripple,
+  .aqar-skeleton,
+  .glass-card-interactive {
     animation: none !important;
+    transition: none !important;
   }
 }
 

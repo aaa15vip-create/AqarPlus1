@@ -13,10 +13,12 @@ import {
 } from '../utils/formatters';
 
 export interface ActiveSessionInfo {
+  sessionId?: string;
   userId: string;
   nameAr: string;
   roleLabelAr: string;
   deviceName: string;
+  ipAddress?: string;
   connectedAt: string;
 }
 
@@ -35,7 +37,10 @@ export type PrimaryNavSection =
   | 'reports'
   | 'team'
   | 'documents'
-  | 'settings';
+  | 'archive'
+  | 'templates'
+  | 'settings'
+  | 'about';
 
 export type NavSection =
   | PrimaryNavSection
@@ -72,10 +77,12 @@ interface AqarContextValue {
   activeCompanyId: string;
   setActiveCompanyId: (companyId: string) => void;
   wsStatus: 'connected' | 'connecting' | 'offline';
+  isBrowserOnline: boolean;
   isOfflineSimulated: boolean;
   toggleOfflineSimulation: () => void;
   offlineQueue: OfflineQueuedAction[];
   syncOfflineQueue: () => Promise<void>;
+  pendingMutationsCount: number;
   presence: ActiveSessionInfo[];
   toasts: ToastMessage[];
   pushToast: (type: ToastMessage['type'], text: string) => void;
@@ -87,19 +94,38 @@ interface AqarContextValue {
     opts?: { idempotencyKey?: string; offlineDescAr?: string; offlineDescEn?: string }
   ) => Promise<T | null>;
   refreshState: () => Promise<void>;
+  onboardingConfig: {
+    open: boolean;
+    initialStage: 'splash' | 'company' | 'property' | 'units';
+    isLockMode: boolean;
+  };
+  openOnboarding: (initialStage?: 'splash' | 'company' | 'property' | 'units', isLockMode?: boolean) => void;
+  closeOnboarding: () => void;
 }
 
 const AqarContext = createContext<AqarContextValue | null>(null);
 
 const OFFLINE_QUEUE_KEY = 'aqarplus_offline_queue_v1';
+const CACHED_STATE_KEY = 'aqarplus_cached_state_v1';
 const USER_STORAGE_KEY = 'aqarplus_active_user_v1';
 const THEME_STORAGE_KEY = 'aqarplus_theme_v1';
 const LANG_STORAGE_KEY = 'aqarplus_lang_v1';
 const BASE_CURRENCY_STORAGE_KEY = 'aqarplus_base_currency_v1';
 
 export function AqarProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<AqarDatabaseState | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [state, setState] = useState<AqarDatabaseState | null>(() => {
+    try {
+      const cached = localStorage.getItem(CACHED_STATE_KEY);
+      return cached ? (JSON.parse(cached) as AqarDatabaseState) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [loading, setLoading] = useState(() => !localStorage.getItem(CACHED_STATE_KEY));
+  const [isBrowserOnline, setIsBrowserOnline] = useState(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [pendingMutationsCount, setPendingMutationsCount] = useState(0);
   const [activeUserId, setActiveUserId] = useState<string>(
     () => localStorage.getItem(USER_STORAGE_KEY) || 'usr-gm'
   );
@@ -116,6 +142,26 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
   const [activeNav, setActiveNavState] = useState<PrimaryNavSection>('dashboard');
   const [leasingFinanceTab, setLeasingFinanceTab] = useState<LeasingFinanceTab>('leasing');
   const [leasingWizardUnitId, setLeasingWizardUnitId] = useState<string | null>(null);
+  const [onboardingConfig, setOnboardingConfig] = useState<{
+    open: boolean;
+    initialStage: 'splash' | 'company' | 'property' | 'units';
+    isLockMode: boolean;
+  }>(() => ({
+    open: typeof window !== 'undefined' ? localStorage.getItem('aqarplus_onboarding_v1') !== 'done' : false,
+    initialStage: 'splash',
+    isLockMode: false,
+  }));
+
+  const openOnboarding = useCallback(
+    (initialStage: 'splash' | 'company' | 'property' | 'units' = 'splash', isLockMode = false) => {
+      setOnboardingConfig({ open: true, initialStage, isLockMode });
+    },
+    []
+  );
+
+  const closeOnboarding = useCallback(() => {
+    setOnboardingConfig((prev) => ({ ...prev, open: false }));
+  }, []);
 
   const setActiveNav = useCallback((nav: NavSection) => {
     if (nav === 'leasing' || nav === 'finance' || nav === 'accounting') {
@@ -151,6 +197,27 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
   const wsRef = useRef<WebSocket | null>(null);
   const activeUserIdRef = useRef(activeUserId);
   activeUserIdRef.current = activeUserId;
+  const inFlightKeysRef = useRef<Set<string>>(new Set());
+
+  const cacheStateSnapshot = useCallback((nextState: AqarDatabaseState) => {
+    setState(nextState);
+    try {
+      localStorage.setItem(CACHED_STATE_KEY, JSON.stringify(nextState));
+    } catch {
+      // Ignore quota exceeded on very large document dataUrls
+    }
+  }, []);
+
+  useEffect(() => {
+    const onOnline = () => setIsBrowserOnline(true);
+    const onOffline = () => setIsBrowserOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
 
   const pushToast = useCallback((type: ToastMessage['type'], text: string) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -238,14 +305,14 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       });
       if (!res.ok) throw new Error('Failed to fetch state');
       const data = await res.json();
-      setState(data.state);
+      cacheStateSnapshot(data.state);
       if (data.presence) setPresence(data.presence);
     } catch (err) {
       console.error(err);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [cacheStateSnapshot]);
 
   const refreshState = useCallback(async () => {
     await fetchState(activeUserIdRef.current);
@@ -292,13 +359,18 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
         try {
           const msg = JSON.parse(event.data);
           if (msg.type === 'state:init' || msg.type === 'state:updated') {
-            if (msg.state) setState(msg.state);
+            if (msg.state) cacheStateSnapshot(msg.state);
             if (msg.presence) setPresence(msg.presence);
             if (msg.type === 'state:updated' && msg.actorUserId !== activeUserIdRef.current && msg.summary) {
               pushToast('info', `تحديث مباشر: ${msg.summary}`);
             }
           } else if (msg.type === 'presence:update') {
             setPresence(msg.sessions || []);
+          } else if (msg.type === 'session:terminated') {
+            if (!msg.userId || msg.userId === activeUserIdRef.current) {
+              pushToast('error', `تم إنهاء جلستك عن بُعد بواسطة ${msg.terminatedBy || 'الإدارة'}: ${msg.reason || ''}`);
+              openOnboarding('splash', true);
+            }
           }
         } catch {
           // ignore
@@ -324,7 +396,7 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       wsRef.current?.close();
     };
-  }, [isOfflineSimulated, pushToast]);
+  }, [isOfflineSimulated, pushToast, openOnboarding, cacheStateSnapshot]);
 
   // Identify updated role on WS when switching users
   useEffect(() => {
@@ -381,7 +453,7 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
           pushToast('error', `تعذر مزامنة (${action.descriptionAr}): ${data.error || 'خطأ'}`);
         } else {
           syncedCount += 1;
-          if (data.state) setState(data.state);
+          if (data.state) cacheStateSnapshot(data.state);
         }
       } catch {
         remaining.push(action);
@@ -398,7 +470,7 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       );
       await fetchState(activeUserIdRef.current);
     }
-  }, [offlineQueue, isOfflineSimulated, lang, pushToast, fetchState]);
+  }, [offlineQueue, isOfflineSimulated, lang, pushToast, fetchState, cacheStateSnapshot]);
 
   const toggleOfflineSimulation = useCallback(() => {
     setIsOfflineSimulated((prev) => {
@@ -417,10 +489,10 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
 
   // Auto-sync when returning online
   useEffect(() => {
-    if (!isOfflineSimulated && wsStatus === 'connected' && offlineQueue.length > 0) {
+    if (!isOfflineSimulated && isBrowserOnline && wsStatus === 'connected' && offlineQueue.length > 0) {
       syncOfflineQueue();
     }
-  }, [isOfflineSimulated, wsStatus, offlineQueue.length, syncOfflineQueue]);
+  }, [isOfflineSimulated, isBrowserOnline, wsStatus, offlineQueue.length, syncOfflineQueue]);
 
   const mutate = useCallback(
     async <T = unknown>(
@@ -431,6 +503,12 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
     ): Promise<T | null> => {
       const idempotencyKey =
         opts?.idempotencyKey || `idem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      // Duplicate submission lock while an identical idempotencyKey is in flight
+      if (inFlightKeysRef.current.has(idempotencyKey)) {
+        return null;
+      }
+
       const deviceName = currentUser?.deviceName || 'Web Terminal';
 
       if (isOfflineSimulated || !navigator.onLine) {
@@ -460,6 +538,8 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
         return null;
       }
 
+      inFlightKeysRef.current.add(idempotencyKey);
+      setPendingMutationsCount((c) => c + 1);
       try {
         const res = await fetch(endpoint, {
           method,
@@ -476,14 +556,17 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
           pushToast('error', data.error || 'تعذر تنفيذ العملية');
           return null;
         }
-        if (data.state) setState(data.state);
+        if (data.state) cacheStateSnapshot(data.state);
         return data as T;
       } catch {
         pushToast('error', lang === 'ar' ? 'تعذر الاتصال بالخادم المركزي' : 'Cannot reach central server');
         return null;
+      } finally {
+        inFlightKeysRef.current.delete(idempotencyKey);
+        setPendingMutationsCount((c) => Math.max(0, c - 1));
       }
     },
-    [currentUser, isOfflineSimulated, lang, pushToast]
+    [currentUser, isOfflineSimulated, lang, pushToast, cacheStateSnapshot]
   );
 
   const value = useMemo<AqarContextValue>(
@@ -513,16 +596,21 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       activeCompanyId,
       setActiveCompanyId,
       wsStatus,
+      isBrowserOnline,
       isOfflineSimulated,
       toggleOfflineSimulation,
       offlineQueue,
       syncOfflineQueue,
+      pendingMutationsCount,
       presence,
       toasts,
       pushToast,
       dismissToast,
       mutate,
       refreshState,
+      onboardingConfig,
+      openOnboarding,
+      closeOnboarding,
     }),
     [
       state,
@@ -547,16 +635,21 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       formatConvertedBase,
       activeCompanyId,
       wsStatus,
+      isBrowserOnline,
       isOfflineSimulated,
       toggleOfflineSimulation,
       offlineQueue,
       syncOfflineQueue,
+      pendingMutationsCount,
       presence,
       toasts,
       pushToast,
       dismissToast,
       mutate,
       refreshState,
+      onboardingConfig,
+      openOnboarding,
+      closeOnboarding,
     ]
   );
 

@@ -368,36 +368,45 @@ export function PropertyAnalyticsPanel() {
             </div>
           </div>
 
-          <div className="h-[190px] w-full" dir="ltr">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={analytics.statusPie}
-                  dataKey="value"
-                  nameKey="name"
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={46}
-                  outerRadius={72}
-                  paddingAngle={3}
-                >
-                  {analytics.statusPie.map((entry, idx) => (
-                    <Cell key={idx} fill={entry.color} stroke="none" />
-                  ))}
-                </Pie>
-                <Tooltip
-                  content={({ active, payload }) => {
-                    if (!active || !payload?.length) return null;
-                    const item = payload[0].payload as (typeof analytics.statusPie)[number];
-                    return (
-                      <div className="px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#13192B] shadow-xl text-xs font-medium">
-                        {item.name}: <span className="font-mono-num font-bold">{item.value}</span>
-                      </div>
-                    );
-                  }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
+          <div className="h-[190px] w-full flex items-center justify-center" dir="ltr">
+            {analytics.statusPie.length === 0 ? (
+              <div className="w-36 h-36 rounded-full border-8 border-dashed border-slate-200 dark:border-white/10 flex flex-col items-center justify-center text-center p-3">
+                <span className="text-sm font-bold font-mono-num text-slate-400">0%</span>
+                <span className="text-[10px] text-slate-500 mt-0.5">
+                  {lang === 'ar' ? 'لا توجد وحدات بعد' : 'No units yet'}
+                </span>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={analytics.statusPie}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={46}
+                    outerRadius={72}
+                    paddingAngle={3}
+                  >
+                    {analytics.statusPie.map((entry, idx) => (
+                      <Cell key={idx} fill={entry.color} stroke="none" />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    content={({ active, payload }) => {
+                      if (!active || !payload?.length) return null;
+                      const item = payload[0].payload as (typeof analytics.statusPie)[number];
+                      return (
+                        <div className="px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#13192B] shadow-xl text-xs font-medium">
+                          {item.name}: <span className="font-mono-num font-bold">{item.value}</span>
+                        </div>
+                      );
+                    }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            )}
           </div>
 
           <div className="space-y-1.5 max-h-20 overflow-y-auto text-[11px]">

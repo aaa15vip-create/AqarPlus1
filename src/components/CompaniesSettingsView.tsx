@@ -1,12 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { Building, Coins, Plus, Save, ShieldCheck, X } from 'lucide-react';
+import { Building, Coins, Info, Plus, Save, ShieldCheck, Sparkles, X } from 'lucide-react';
 import { useAqar } from '../context/AqarContext';
 import { CurrencyCode, PropertyOwnershipMode } from '../types/aqar';
 import { CURRENCY_META, DEFAULT_CURRENCY_RATES_TO_SAR, formatCurrency } from '../utils/formatters';
 import { PrintViewButton } from './PrintViewButton';
 
 export function CompaniesSettingsView() {
-  const { state, lang, hasPermission, mutate, pushToast, baseCurrency, setBaseCurrency, convertToBase } = useAqar();
+  const { state, lang, hasPermission, mutate, pushToast, baseCurrency, setBaseCurrency, convertToBase, openOnboarding, setActiveNav } = useAqar();
   const [showAddCompany, setShowAddCompany] = useState(false);
 
   const [companyForm, setCompanyForm] = useState({
@@ -160,7 +160,23 @@ export function CompaniesSettingsView() {
               : 'Separate company and owner revenues, configure multi-currency exchange rates, receipts, and calendar settings.'}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveNav('about')}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.04] hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
+          >
+            <Info className="w-3.5 h-3.5 text-[#26478D] dark:text-blue-400" />
+            <span>{lang === 'ar' ? 'حول التطبيق وأيقونة النظام' : 'About & App Icon'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => openOnboarding('company', false)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.04] hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-[#26478D] dark:text-blue-400" />
+            <span>{lang === 'ar' ? 'معالج الإعداد الأولي' : 'Setup Wizard'}</span>
+          </button>
           <PrintViewButton />
           {hasPermission('manage_properties') && (
             <button

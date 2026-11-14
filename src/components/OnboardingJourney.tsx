@@ -1,8 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
-  Building,
   Building2,
   Camera,
   Check,
@@ -10,6 +9,8 @@ import {
   ChevronDown,
   ChevronUp,
   Delete,
+  Droplets,
+  ExternalLink,
   Fingerprint,
   Home,
   Landmark,
@@ -17,12 +18,12 @@ import {
   Loader2,
   Lock,
   MapPin,
-  ShieldCheck,
-  Sparkles,
+  Paperclip,
   Store,
   Upload,
   Wind,
   X,
+  Zap,
 } from 'lucide-react';
 import { useAqar } from '../context/AqarContext';
 import { Property, PropertyType, Unit, UnitStatus, UnitType } from '../types/aqar';
@@ -37,12 +38,16 @@ interface GeneratedDraftUnit {
   floor: number;
   unitNumber: string;
   unitType: UnitType;
+  rooms: number;
   areaSqm: number;
   suggestedAnnualRent: number;
   securityDeposit: number;
+  acEnabled: boolean;
   acType: 'سبليت' | 'شباك' | 'مركزي';
   kitchenInstalled: boolean;
+  electricityEnabled: boolean;
   electricityMeter: string;
+  waterEnabled: boolean;
   waterMeter: string;
   status: UnitStatus;
   attachment?: ProcessedScanResult;
@@ -54,7 +59,7 @@ interface OnboardingJourneyProps {
   onComplete: () => void;
 }
 
-const PIN_STORAGE_KEY = 'aqarplus_master_pin_v1';
+export const PIN_STORAGE_KEY = 'aqarplus_master_pin_v1';
 const BIOMETRIC_STORAGE_KEY = 'aqarplus_biometric_v1';
 export const ONBOARDING_DONE_KEY = 'aqarplus_onboarding_v1';
 
@@ -68,24 +73,40 @@ function triggerHaptic() {
   }
 }
 
-function generateDraftUnits(floors: number, perFloor: number): GeneratedDraftUnit[] {
+function generateDraftUnits(
+  floors: number,
+  perFloor: number,
+  defaultUnitType: UnitType = 'شقة',
+  existing: GeneratedDraftUnit[] = []
+): GeneratedDraftUnit[] {
   const safeFloors = Math.min(20, Math.max(1, floors));
   const safePerFloor = Math.min(24, Math.max(1, perFloor));
+  const existingMap = new Map(existing.map((u) => [u.tempId, u]));
   const list: GeneratedDraftUnit[] = [];
   for (let f = 1; f <= safeFloors; f++) {
     for (let u = 1; u <= safePerFloor; u++) {
-      const unitNumber = `ط${f}-ش${u}`;
+      const tempId = `draft-${f}-${u}`;
+      const prev = existingMap.get(tempId);
+      if (prev) {
+        list.push(prev);
+        continue;
+      }
+      const unitNumber = defaultUnitType === 'فيلا' ? `فيلا-${f}${u > 1 ? `-${u}` : ''}` : `ط${f}-ش${u}`;
       list.push({
-        tempId: `draft-${f}-${u}`,
+        tempId,
         floor: f,
         unitNumber,
-        unitType: 'شقة',
-        areaSqm: 125,
-        suggestedAnnualRent: 42000,
-        securityDeposit: 3000,
+        unitType: defaultUnitType,
+        rooms: defaultUnitType === 'فيلا' ? 5 : 3,
+        areaSqm: defaultUnitType === 'فيلا' ? 320 : 125,
+        suggestedAnnualRent: defaultUnitType === 'فيلا' ? 95000 : 42000,
+        securityDeposit: defaultUnitType === 'فيلا' ? 5000 : 3000,
+        acEnabled: true,
         acType: 'سبليت',
         kitchenInstalled: true,
+        electricityEnabled: true,
         electricityMeter: `ELEC-${f}0${u}`,
+        waterEnabled: true,
         waterMeter: `WAT-${f}0${u}`,
         status: 'شاغرة',
       });
@@ -111,8 +132,9 @@ export function OnboardingJourney({
 
   // Stage 2: Company Identity (Step 1 of 3)
   const [companyLogo, setCompanyLogo] = useState<string>(state?.settings.logoDataUrl || '');
+  const [logoScannerOpen, setLogoScannerOpen] = useState(false);
   const [companyNameAr, setCompanyNameAr] = useState(
-    state?.settings.nameAr || 'شركة عبدالله إبراهيم محمد الجنيدل العقارية'
+    state?.settings.nameAr || 'شركة الجنيدل العقارية'
   );
   const [companyNameEn, setCompanyNameEn] = useState(
     state?.settings.nameEn || 'Al-Junaidel Real Estate Co.'
@@ -124,6 +146,7 @@ export function OnboardingJourney({
   const [propNameAr, setPropNameAr] = useState('');
   const [propCity, setPropCity] = useState('الرياض');
   const [propDistrict, setPropDistrict] = useState('');
+  const [propPreset, setPropPreset] = useState<'building' | 'compound' | 'villa' | 'commercial'>('building');
   const [propType, setPropType] = useState<PropertyType>('سكني');
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [geoBusy, setGeoBusy] = useState(false);
@@ -135,6 +158,7 @@ export function OnboardingJourney({
   const [editingUnitId, setEditingUnitId] = useState<string | null>(null);
   const [openAccordion, setOpenAccordion] = useState<'basic' | 'amenities' | 'status' | 'docs'>('basic');
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [startFreshWorkspace, setStartFreshWorkspace] = useState(true);
   const [savingAll, setSavingAll] = useState(false);
 
   // Stage 4: Created Summary
@@ -189,6 +213,22 @@ export function OnboardingJourney({
     }
     setStage('company');
   };
+
+  useEffect(() => {
+    if (stage !== 'splash') return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key >= '0' && e.key <= '9') {
+        handlePinDigit(e.key);
+      } else if (e.key === 'Backspace') {
+        handlePinBackspace();
+      } else if (e.key === 'Enter' && pinInput.length === 4) {
+        handlePinSubmit();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, pinInput, isLockMode, savedPin, biometricEnabled]);
 
   const handleBiometricUnlock = () => {
     triggerHaptic();
@@ -269,18 +309,51 @@ export function OnboardingJourney({
     );
   };
 
-  const handleRegenerateGrid = (nextFloors: number, nextPerFloor: number) => {
+  const defaultDraftType: UnitType =
+    propPreset === 'villa' ? 'فيلا' : propPreset === 'commercial' ? 'معرض تجاري' : 'شقة';
+
+  const handleRegenerateGrid = (nextFloors: number, nextPerFloor: number, unitTypeOverride?: UnitType) => {
     setFloorsCount(nextFloors);
     setUnitsPerFloor(nextPerFloor);
-    setDraftUnits(generateDraftUnits(nextFloors, nextPerFloor));
+    setDraftUnits((prev) => generateDraftUnits(nextFloors, nextPerFloor, unitTypeOverride || defaultDraftType, prev));
+  };
+
+  const handleSelectPropertyPreset = (preset: 'building' | 'compound' | 'villa' | 'commercial') => {
+    triggerHaptic();
+    setPropPreset(preset);
+    if (preset === 'building') {
+      setPropType('سكني');
+      setFloorsCount(3);
+      setUnitsPerFloor(4);
+      setDraftUnits(generateDraftUnits(3, 4, 'شقة'));
+    } else if (preset === 'compound') {
+      setPropType('مختلط');
+      setFloorsCount(2);
+      setUnitsPerFloor(6);
+      setDraftUnits(generateDraftUnits(2, 6, 'شقة'));
+    } else if (preset === 'villa') {
+      setPropType('سكني');
+      setFloorsCount(1);
+      setUnitsPerFloor(1);
+      setDraftUnits(generateDraftUnits(1, 1, 'فيلا'));
+    } else {
+      setPropType('تجاري');
+      setFloorsCount(2);
+      setUnitsPerFloor(4);
+      setDraftUnits(generateDraftUnits(2, 4, 'معرض تجاري'));
+    }
   };
 
   const handleCompleteAssetSetup = async () => {
     triggerHaptic();
-    const safePropName = propNameAr.trim() || 'عمارة طيبة السكنية';
+    const safePropName = propNameAr.trim() || (propPreset === 'villa' ? 'فيلا الياسمين' : 'عمارة طيبة السكنية');
     const safeDistrict = propDistrict.trim() || 'الياسمين';
     setSavingAll(true);
     try {
+      if (startFreshWorkspace) {
+        await mutate('POST', '/api/workspace/reset-fresh', {}, { offlineDescAr: 'تهيئة مساحة عمل نظيفة' });
+      }
+
       const code = `PRP-${Math.floor(100 + Math.random() * 899)}`;
       const propRes = await mutate<{ property?: Property }>(
         'POST',
@@ -325,16 +398,16 @@ export function OnboardingJourney({
               unitNumber: draft.unitNumber,
               unitType: draft.unitType,
               areaSqm: draft.areaSqm,
-              rooms: draft.unitType === 'استوديو' ? 1 : 3,
+              rooms: draft.rooms,
               bathrooms: draft.unitType === 'استوديو' ? 1 : 2,
               furnished: false,
-              acCount: draft.acType === 'مركزي' ? 1 : 4,
-              acType: draft.acType,
+              acCount: !draft.acEnabled ? 0 : draft.acType === 'مركزي' ? 1 : 4,
+              acType: draft.acEnabled ? draft.acType : undefined,
               kitchenInstalled: draft.kitchenInstalled,
-              electricityMeter: draft.electricityMeter,
-              waterMeter: draft.waterMeter,
+              electricityMeter: draft.electricityEnabled ? draft.electricityMeter : 'بدون عداد مستقل',
+              waterMeter: draft.waterEnabled ? draft.waterMeter : 'بدون عداد مستقل',
               keyCount: 3,
-              acRemoteCount: 4,
+              acRemoteCount: draft.acEnabled ? 4 : 0,
               suggestedMonthlyRent: Math.round(draft.suggestedAnnualRent / 12),
               suggestedAnnualRent: draft.suggestedAnnualRent,
               officeFee: 1000,
@@ -348,10 +421,10 @@ export function OnboardingJourney({
           if (draft.attachment && unitRes?.unit) {
             await mutate('POST', '/api/documents', {
               title: `مرفق وحدة ${draft.unitNumber} - ${safePropName}`,
-              category: 'أخرى',
+              category: 'صور العقارات',
               fileName: `${draft.unitNumber}-scan.jpg`,
               fileType: 'JPG',
-              fileSizeKb: draft.attachment.estimatedSizeKb,
+              fileSizeKb: draft.attachment.sizeKb,
               relatedType: 'وحدة',
               relatedId: unitRes.unit.id,
               version: 1,
@@ -572,10 +645,10 @@ export function OnboardingJourney({
           {/* Step 1 of 3: Company Identity */}
           {stage === 'company' && (
             <form onSubmit={handleSaveCompanyStep} className="space-y-6">
-              {/* Circular Logo Uploader */}
+              {/* Circular Logo Uploader (Gallery or Camera) */}
               <div className="flex flex-col items-center gap-3">
                 <label className="relative group cursor-pointer">
-                  <div className="w-28 h-28 rounded-full border-2 border-dashed border-blue-400/60 bg-white/5 flex items-center justify-center overflow-hidden shadow-[0_0_30px_rgba(37,99,235,0.28)] group-hover:border-blue-300 transition-colors">
+                  <div className="w-28 h-28 rounded-full border-2 border-dashed border-blue-400/60 bg-white/5 flex items-center justify-center overflow-hidden shadow-[0_0_32px_rgba(37,99,235,0.34)] group-hover:border-blue-300 transition-all group-hover:scale-[1.02]">
                     {companyLogo ? (
                       <img
                         src={companyLogo}
@@ -602,6 +675,32 @@ export function OnboardingJourney({
                     }}
                   />
                 </label>
+                <div className="flex items-center gap-2">
+                  <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 border border-white/15 text-[11px] font-medium cursor-pointer transition-colors">
+                    <Upload className="w-3.5 h-3.5 text-blue-300" />
+                    <span>{lang === 'ar' ? 'من المعرض' : 'Gallery'}</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) handleLogoFile(f);
+                      }}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic();
+                      setLogoScannerOpen(true);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 border border-white/15 text-[11px] font-medium cursor-pointer transition-colors"
+                  >
+                    <Camera className="w-3.5 h-3.5 text-emerald-300" />
+                    <span>{lang === 'ar' ? 'التقاط بالكاميرا' : 'Camera'}</span>
+                  </button>
+                </div>
                 <span className="text-[11px] text-slate-300">
                   {lang === 'ar' ? 'يظهر الشعار في أعلى السندات والتقارير الرسمية' : 'Appears on official receipts and PDF reports'}
                 </span>
@@ -717,22 +816,19 @@ export function OnboardingJourney({
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   {(
                     [
-                      { value: 'سكني', labelAr: 'عمارة / سكني', labelEn: 'Residential', icon: Building2 },
-                      { value: 'مختلط', labelAr: 'مجمع / مختلط', labelEn: 'Compound', icon: Layers },
-                      { value: 'تجاري', labelAr: 'معارض / تجاري', labelEn: 'Commercial', icon: Store },
-                      { value: 'إداري', labelAr: 'مكاتب / إداري', labelEn: 'Administrative', icon: Landmark },
+                      { preset: 'building', labelAr: 'عمارة', labelEn: 'Building', icon: Building2 },
+                      { preset: 'compound', labelAr: 'مجمع', labelEn: 'Compound', icon: Layers },
+                      { preset: 'villa', labelAr: 'فيلا', labelEn: 'Villa', icon: Home },
+                      { preset: 'commercial', labelAr: 'تجاري / إداري', labelEn: 'Commercial', icon: Store },
                     ] as const
                   ).map((opt) => {
                     const Icon = opt.icon;
-                    const active = propType === opt.value;
+                    const active = propPreset === opt.preset;
                     return (
                       <button
-                        key={opt.value}
+                        key={opt.preset}
                         type="button"
-                        onClick={() => {
-                          triggerHaptic();
-                          setPropType(opt.value);
-                        }}
+                        onClick={() => handleSelectPropertyPreset(opt.preset)}
                         className={`p-3.5 rounded-xl border text-center space-y-1.5 transition-all cursor-pointer ${
                           active
                             ? 'bg-blue-600/30 border-blue-400 text-white shadow-sm'
@@ -762,15 +858,30 @@ export function OnboardingJourney({
                       : 'Capture GPS coordinates for property record'}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleCaptureLocation}
-                  disabled={geoBusy}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-xs font-semibold cursor-pointer whitespace-nowrap"
-                >
-                  {geoBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MapPin className="w-3.5 h-3.5" />}
-                  <span>{lang === 'ar' ? 'إضافة موقع على الخريطة' : 'Capture Map Location'}</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCaptureLocation}
+                    disabled={geoBusy}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-xs font-semibold cursor-pointer whitespace-nowrap"
+                  >
+                    {geoBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MapPin className="w-3.5 h-3.5" />}
+                    <span>{lang === 'ar' ? 'إضافة موقع على الخريطة' : 'Capture Map Location'}</span>
+                  </button>
+                  <a
+                    href={
+                      coords
+                        ? `https://maps.google.com/?q=${coords.lat},${coords.lng}`
+                        : `https://maps.google.com/?q=${encodeURIComponent(`${propCity} ${propDistrict} ${propNameAr}`.trim() || 'Riyadh')}`
+                    }
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-3 py-2 rounded-xl border border-white/15 hover:bg-white/10 text-xs text-blue-200 whitespace-nowrap"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>{lang === 'ar' ? 'فتح الخرائط' : 'Open Maps'}</span>
+                  </a>
+                </div>
               </div>
 
               <div className="flex items-center justify-between gap-3 pt-2">
@@ -882,7 +993,22 @@ export function OnboardingJourney({
                 ))}
               </div>
 
-              <div className="flex items-center justify-between gap-3 pt-2">
+              {/* Clean Workspace Toggle */}
+              <label className="flex items-center gap-2.5 p-3 rounded-xl border border-white/10 bg-white/[0.04] text-xs cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={startFreshWorkspace}
+                  onChange={(e) => setStartFreshWorkspace(e.target.checked)}
+                  className="rounded accent-emerald-500"
+                />
+                <span className="text-slate-200">
+                  {lang === 'ar'
+                    ? 'بدء لوحة تحكم نظيفة بعقارك ووحداتك الجديدة فقط (0 وحدات مؤجرة · 0 ر.س تحصيل)'
+                    : 'Start with a clean dashboard showing only your newly added property (0 leased, 0 collected)'}
+                </span>
+              </label>
+
+              <div className="flex items-center justify-between gap-3 pt-1">
                 <button
                   type="button"
                   onClick={() => setStage('property')}
@@ -917,8 +1043,11 @@ export function OnboardingJourney({
       {/* Stage 4: Animated Success Transition Screen */}
       {stage === 'success' && (
         <div className="w-full max-w-md rounded-3xl border border-white/15 bg-[#0F172A]/95 backdrop-blur-2xl text-white p-8 shadow-2xl text-center space-y-6 animate-aqar-fade-scale">
-          <div className="w-20 h-20 mx-auto rounded-full bg-emerald-500/20 border-2 border-emerald-400 flex items-center justify-center">
-            <Check className="w-10 h-10 text-emerald-400" />
+          <div className="relative w-20 h-20 mx-auto">
+            <div className="absolute inset-0 rounded-full bg-emerald-400/25 animate-ping" />
+            <div className="relative w-20 h-20 rounded-full bg-emerald-500/20 border-2 border-emerald-400 flex items-center justify-center shadow-[0_0_28px_rgba(16,185,129,0.4)]">
+              <Check className="w-10 h-10 text-emerald-400" />
+            </div>
           </div>
           <div className="space-y-2">
             <h2 className="text-xl font-bold">
@@ -926,7 +1055,7 @@ export function OnboardingJourney({
             </h2>
             <p className="text-sm text-slate-300">
               {lang === 'ar'
-                ? 'عقاراتك جاهزة للإدارة المتكاملة الآن'
+                ? 'عقاراتك جاهزة للإدارة'
                 : 'Your company, building, and units are live and ready for management.'}
             </p>
           </div>
@@ -1017,11 +1146,22 @@ export function OnboardingJourney({
                     </select>
                   </div>
                   <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">عدد الغرف (غرفتين وصالة = 3)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={20}
+                      value={activeDraftUnit.rooms}
+                      onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { rooms: Number(e.target.value) || 1 })}
+                      className="w-full px-3 py-2 rounded-lg border border-white/15 bg-white/5 font-mono-num"
+                    />
+                  </div>
+                  <div>
                     <label className="text-[11px] text-slate-400 block mb-1">المساحة (م²)</label>
                     <input
                       type="number"
                       value={activeDraftUnit.areaSqm}
-                      onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { areaSqm: Number(e.target.value) })}
+                      onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { areaSqm: Number(e.target.value) || 0 })}
                       className="w-full px-3 py-2 rounded-lg border border-white/15 bg-white/5 font-mono-num"
                     />
                   </div>
@@ -1030,7 +1170,20 @@ export function OnboardingJourney({
                     <input
                       type="number"
                       value={activeDraftUnit.suggestedAnnualRent}
-                      onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { suggestedAnnualRent: Number(e.target.value) })}
+                      onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { suggestedAnnualRent: Number(e.target.value) || 0 })}
+                      className="w-full px-3 py-2 rounded-lg border border-white/15 bg-white/5 font-mono-num font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">الإيجار الشهري (SAR)</label>
+                    <input
+                      type="number"
+                      value={Math.round(activeDraftUnit.suggestedAnnualRent / 12)}
+                      onChange={(e) =>
+                        updateDraftUnit(activeDraftUnit.tempId, {
+                          suggestedAnnualRent: (Number(e.target.value) || 0) * 12,
+                        })
+                      }
                       className="w-full px-3 py-2 rounded-lg border border-white/15 bg-white/5 font-mono-num font-bold"
                     />
                   </div>
@@ -1039,7 +1192,7 @@ export function OnboardingJourney({
                     <input
                       type="number"
                       value={activeDraftUnit.securityDeposit}
-                      onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { securityDeposit: Number(e.target.value) })}
+                      onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { securityDeposit: Number(e.target.value) || 0 })}
                       className="w-full px-3 py-2 rounded-lg border border-white/15 bg-white/5 font-mono-num"
                     />
                   </div>
@@ -1062,23 +1215,37 @@ export function OnboardingJourney({
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="inline-flex items-center gap-1.5 text-slate-300">
                       <Wind className="w-3.5 h-3.5 text-blue-300" />
-                      <span>نوع التكييف:</span>
+                      <span>التكييف:</span>
                     </span>
-                    <div className="flex items-center gap-1.5">
-                      {(['سبليت', 'شباك', 'مركزي'] as const).map((ac) => (
-                        <button
-                          key={ac}
-                          type="button"
-                          onClick={() => updateDraftUnit(activeDraftUnit.tempId, { acType: ac })}
-                          className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold border cursor-pointer ${
-                            activeDraftUnit.acType === ac
-                              ? 'bg-blue-600 border-blue-500 text-white'
-                              : 'border-white/15 bg-white/5 text-slate-300'
-                          }`}
-                        >
-                          {ac}
-                        </button>
-                      ))}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateDraftUnit(activeDraftUnit.tempId, { acEnabled: !activeDraftUnit.acEnabled })
+                        }
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border cursor-pointer ${
+                          activeDraftUnit.acEnabled
+                            ? 'bg-emerald-600/30 border-emerald-400/50 text-emerald-200'
+                            : 'border-white/15 bg-white/5 text-slate-400'
+                        }`}
+                      >
+                        {activeDraftUnit.acEnabled ? 'مفعّل' : 'بدون'}
+                      </button>
+                      {activeDraftUnit.acEnabled &&
+                        (['سبليت', 'شباك', 'مركزي'] as const).map((ac) => (
+                          <button
+                            key={ac}
+                            type="button"
+                            onClick={() => updateDraftUnit(activeDraftUnit.tempId, { acType: ac })}
+                            className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold border cursor-pointer ${
+                              activeDraftUnit.acType === ac
+                                ? 'bg-blue-600 border-blue-500 text-white'
+                                : 'border-white/15 bg-white/5 text-slate-300'
+                            }`}
+                          >
+                            {ac}
+                          </button>
+                        ))}
                     </div>
                   </div>
 
@@ -1104,22 +1271,69 @@ export function OnboardingJourney({
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3 pt-1">
-                    <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">رقم عداد الكهرباء</label>
-                      <input
-                        value={activeDraftUnit.electricityMeter}
-                        onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { electricityMeter: e.target.value })}
-                        className="w-full px-3 py-2 rounded-lg border border-white/15 bg-white/5 font-mono-num"
-                      />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1 text-[11px] text-slate-300">
+                          <Zap className="w-3.5 h-3.5 text-amber-300" />
+                          <span>عداد الكهرباء</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateDraftUnit(activeDraftUnit.tempId, {
+                              electricityEnabled: !activeDraftUnit.electricityEnabled,
+                            })
+                          }
+                          className={`px-2 py-0.5 rounded text-[10px] font-semibold border cursor-pointer ${
+                            activeDraftUnit.electricityEnabled
+                              ? 'bg-emerald-600/30 border-emerald-400/50 text-emerald-200'
+                              : 'border-white/15 bg-white/5 text-slate-400'
+                          }`}
+                        >
+                          {activeDraftUnit.electricityEnabled ? 'متوفر' : 'غير متوفر'}
+                        </button>
+                      </div>
+                      {activeDraftUnit.electricityEnabled && (
+                        <input
+                          value={activeDraftUnit.electricityMeter}
+                          onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { electricityMeter: e.target.value })}
+                          placeholder="رقم عداد الكهرباء"
+                          className="w-full px-3 py-2 rounded-lg border border-white/15 bg-white/5 font-mono-num"
+                        />
+                      )}
                     </div>
-                    <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">رقم عداد المياه</label>
-                      <input
-                        value={activeDraftUnit.waterMeter}
-                        onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { waterMeter: e.target.value })}
-                        className="w-full px-3 py-2 rounded-lg border border-white/15 bg-white/5 font-mono-num"
-                      />
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1 text-[11px] text-slate-300">
+                          <Droplets className="w-3.5 h-3.5 text-sky-300" />
+                          <span>عداد المياه</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateDraftUnit(activeDraftUnit.tempId, {
+                              waterEnabled: !activeDraftUnit.waterEnabled,
+                            })
+                          }
+                          className={`px-2 py-0.5 rounded text-[10px] font-semibold border cursor-pointer ${
+                            activeDraftUnit.waterEnabled
+                              ? 'bg-emerald-600/30 border-emerald-400/50 text-emerald-200'
+                              : 'border-white/15 bg-white/5 text-slate-400'
+                          }`}
+                        >
+                          {activeDraftUnit.waterEnabled ? 'متوفر' : 'غير متوفر'}
+                        </button>
+                      </div>
+                      {activeDraftUnit.waterEnabled && (
+                        <input
+                          value={activeDraftUnit.waterMeter}
+                          onChange={(e) => updateDraftUnit(activeDraftUnit.tempId, { waterMeter: e.target.value })}
+                          placeholder="رقم عداد المياه"
+                          className="w-full px-3 py-2 rounded-lg border border-white/15 bg-white/5 font-mono-num"
+                        />
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1141,28 +1355,37 @@ export function OnboardingJourney({
                   <div>
                     <label className="text-[11px] text-slate-400 block mb-1.5">الحالة التشغيلية الأولية</label>
                     <div className="grid grid-cols-3 gap-2">
-                      {(['شاغرة', 'تحت الصيانة', 'محجوزة'] as UnitStatus[]).map((st) => (
+                      {(
+                        [
+                          { value: 'شاغرة', label: 'شاغرة وجاهزة', activeCls: 'bg-emerald-600 border-emerald-400 text-white' },
+                          { value: 'تحت الصيانة', label: 'تحتاج صيانة', activeCls: 'bg-amber-600 border-amber-400 text-white' },
+                          { value: 'محجوزة', label: 'محجوزة', activeCls: 'bg-blue-600 border-blue-400 text-white' },
+                        ] as const
+                      ).map((opt) => (
                         <button
-                          key={st}
+                          key={opt.value}
                           type="button"
-                          onClick={() => updateDraftUnit(activeDraftUnit.tempId, { status: st })}
+                          onClick={() => updateDraftUnit(activeDraftUnit.tempId, { status: opt.value })}
                           className={`py-2 px-2 rounded-lg border text-[11px] font-semibold cursor-pointer ${
-                            activeDraftUnit.status === st
-                              ? 'bg-blue-600 border-blue-400 text-white'
+                            activeDraftUnit.status === opt.value
+                              ? opt.activeCls
                               : 'border-white/15 bg-white/5 text-slate-300'
                           }`}
                         >
-                          {st}
+                          {opt.label}
                         </button>
                       ))}
                     </div>
                   </div>
 
                   <div className="flex items-center justify-between gap-3 pt-1">
-                    <div className="text-[11px] text-slate-300">
-                      {activeDraftUnit.attachment
-                        ? 'تم التقاط وتحسين مرفق الوحدة ✓'
-                        : 'التقاط صورة للوحدة أو الصك مع القص والتحسين التلقائي'}
+                    <div className="text-[11px] text-slate-300 inline-flex items-center gap-1.5">
+                      <Paperclip className="w-3.5 h-3.5 text-blue-300 shrink-0" />
+                      <span>
+                        {activeDraftUnit.attachment
+                          ? `تم التقاط وتحسين المرفق (${activeDraftUnit.attachment.sizeKb} KB) ✓`
+                          : 'التقاط صورة للوحدة أو الصك مع القص والتحسين التلقائي'}
+                      </span>
                     </div>
                     <button
                       type="button"
@@ -1173,6 +1396,23 @@ export function OnboardingJourney({
                       <span>{lang === 'ar' ? 'فتح الكاميرا' : 'Scan'}</span>
                     </button>
                   </div>
+
+                  {activeDraftUnit.attachment && (
+                    <div className="pt-1 flex items-center gap-3">
+                      <img
+                        src={activeDraftUnit.attachment.dataUrl}
+                        alt="Unit attachment preview"
+                        className="w-16 h-16 rounded-xl object-cover border border-white/20"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => updateDraftUnit(activeDraftUnit.tempId, { attachment: undefined })}
+                        className="text-[11px] text-red-300 hover:underline cursor-pointer"
+                      >
+                        {lang === 'ar' ? 'إزالة المرفق' : 'Remove attachment'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1190,11 +1430,26 @@ export function OnboardingJourney({
 
       {scannerOpen && activeDraftUnit && (
         <CameraDocumentScannerModal
+          open={scannerOpen}
+          lang={lang}
           onClose={() => setScannerOpen(false)}
-          onConfirm={(res) => {
+          onComplete={(res) => {
             updateDraftUnit(activeDraftUnit.tempId, { attachment: res });
             setScannerOpen(false);
             pushToast('success', lang === 'ar' ? 'تم تحسين المرفق وإرفاقه بالوحدة' : 'Scan attached to unit');
+          }}
+        />
+      )}
+
+      {logoScannerOpen && (
+        <CameraDocumentScannerModal
+          open={logoScannerOpen}
+          lang={lang}
+          onClose={() => setLogoScannerOpen(false)}
+          onComplete={(res) => {
+            setCompanyLogo(res.dataUrl);
+            setLogoScannerOpen(false);
+            pushToast('success', lang === 'ar' ? 'تم التقاط شعار الشركة بنجاح' : 'Company logo captured');
           }}
         />
       )}

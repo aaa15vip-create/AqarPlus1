@@ -32,6 +32,7 @@ import {
 } from '../types/aqar';
 import { formatDateTime } from '../utils/formatters';
 import { CameraDocumentScannerModal } from './CameraDocumentScannerModal';
+import { MoveToArchiveButton } from './MoveToArchiveButton';
 import { ProcessedScanResult } from '../utils/documentScanProcessor';
 import { runGeminiOcrExtraction } from '../utils/ocrClient';
 
@@ -732,6 +733,14 @@ export function DocumentArchiveOcrPanel() {
                 >
                   <Download className="w-3 h-3" />
                 </button>
+                {!doc.archivedAt && hasPermission('manage_documents') && (
+                  <MoveToArchiveButton
+                    category="documents"
+                    entityId={doc.id}
+                    entityLabel={doc.title}
+                    compact
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -1134,32 +1143,73 @@ export function DocumentArchiveOcrPanel() {
 
       {/* Document Preview & Audit Trail Modal */}
       {livePreviewDoc && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 backdrop-blur-sm p-4 overflow-y-auto">
-          <div className="w-full max-w-3xl rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#13192B] p-6 space-y-5 my-8">
-            <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-200 dark:border-white/10">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 backdrop-blur-sm p-4 overflow-y-auto print:bg-white print:p-0">
+          <div className="w-full max-w-3xl rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#13192B] p-6 space-y-5 my-8 animate-aqar-fade-scale print-only-panel">
+            <div className="flex flex-wrap items-start justify-between gap-3 pb-3 border-b border-slate-200 dark:border-white/10 no-print">
               <div>
                 <div className="text-xs text-slate-500">
                   {livePreviewDoc.category} · v{livePreviewDoc.version} · {livePreviewDoc.fileName}
                 </div>
                 <h3 className="text-base font-bold mt-0.5">{livePreviewDoc.title}</h3>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <a
+                  href={`https://wa.me/?text=${encodeURIComponent(
+                    `${livePreviewDoc.title} (${livePreviewDoc.category}) - ${livePreviewDoc.fileName}`
+                  )}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 min-h-[42px] rounded-xl border border-emerald-300 dark:border-emerald-500/30 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 text-xs font-medium cursor-pointer"
+                >
+                  <span>{lang === 'ar' ? 'واتساب' : 'WhatsApp'}</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="inline-flex items-center gap-1.5 px-3 min-h-[42px] rounded-xl bg-[#26478D] text-white text-xs font-medium cursor-pointer"
+                >
+                  <span>{lang === 'ar' ? 'طباعة / PDF' : 'Print'}</span>
+                </button>
                 <button
                   onClick={() => handleDownloadDocument(livePreviewDoc)}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 text-xs font-medium cursor-pointer"
+                  className="inline-flex items-center gap-1 px-3 min-h-[42px] rounded-xl border border-slate-200 dark:border-white/10 text-xs font-medium cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>{lang === 'ar' ? 'تنزيل' : 'Download'}</span>
                 </button>
-                <button onClick={() => setPreviewDoc(null)} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer">
+                <button
+                  onClick={() => setPreviewDoc(null)}
+                  className="min-w-[42px] min-h-[42px] flex items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
+                >
                   <X className="w-4 h-4" />
                 </button>
               </div>
             </div>
 
-            {livePreviewDoc.dataUrl && livePreviewDoc.dataUrl.startsWith('data:image/') && (
-              <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-100 dark:bg-black/30 p-2 max-h-72 overflow-hidden flex justify-center">
-                <img src={livePreviewDoc.dataUrl} alt={livePreviewDoc.title} className="max-h-68 object-contain" />
+            {livePreviewDoc.dataUrl && livePreviewDoc.dataUrl.startsWith('data:image/') ? (
+              <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-100 dark:bg-black/30 p-2 max-h-80 overflow-hidden flex justify-center">
+                <img
+                  src={livePreviewDoc.dataUrl}
+                  alt={livePreviewDoc.title}
+                  referrerPolicy="no-referrer"
+                  className="max-h-76 object-contain rounded-lg"
+                />
+              </div>
+            ) : livePreviewDoc.dataUrl && livePreviewDoc.dataUrl.startsWith('data:application/pdf') ? (
+              <div className="rounded-xl border border-slate-200 dark:border-white/10 overflow-hidden h-80 bg-slate-100 dark:bg-black/30">
+                <iframe
+                  src={livePreviewDoc.dataUrl}
+                  title={livePreviewDoc.title}
+                  className="w-full h-full border-0"
+                />
+              </div>
+            ) : (
+              <div className="p-6 rounded-xl border border-dashed border-slate-200 dark:border-white/15 bg-slate-50/70 dark:bg-white/[0.02] text-center space-y-1">
+                <FileText className="w-7 h-7 mx-auto text-[#26478D] dark:text-blue-400" />
+                <div className="text-xs font-semibold">{livePreviewDoc.fileName}</div>
+                <div className="text-[11px] text-slate-500 font-mono-num">
+                  {livePreviewDoc.fileType} · {livePreviewDoc.fileSizeKb} KB
+                </div>
               </div>
             )}
 

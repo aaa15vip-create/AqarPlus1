@@ -33,6 +33,8 @@ import {
   UnitStatus,
 } from '../types/aqar';
 import { CURRENCY_META, formatDateTime, formatSar } from '../utils/formatters';
+import { MoveToArchiveButton } from './MoveToArchiveButton';
+import { CreateTaskQuickButton } from './CreateTaskQuickModal';
 import { PrintViewButton } from './PrintViewButton';
 import { readFileAsDataUrl, runGeminiOcrExtraction } from '../utils/ocrClient';
 
@@ -493,6 +495,12 @@ export function LeasingContractsView() {
 
         <div className="flex flex-wrap items-center gap-2">
           <PrintViewButton />
+          <CreateTaskQuickButton
+            defaultType="تأجير"
+            defaultTitle="متابعة توثيق عقد إيجار ومحضر التسليم"
+            relatedLabel="قسم العقود والتأجير"
+            compact
+          />
           {hasPermission('manage_contracts') && tab === 'contracts' && (
             <button
               onClick={() => {
@@ -632,6 +640,14 @@ export function LeasingContractsView() {
                             <RefreshCw className="w-3.5 h-3.5" />
                             <span>{lang === 'ar' ? 'تجديد سريع' : 'Renew'}</span>
                           </button>
+                        )}
+                        {hasPermission('manage_contracts') && !c.archivedAt && (
+                          <MoveToArchiveButton
+                            category="contracts"
+                            entityId={c.id}
+                            entityLabel={c.internalNumber}
+                            compact
+                          />
                         )}
                       </div>
                     </td>

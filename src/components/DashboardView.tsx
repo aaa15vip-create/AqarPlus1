@@ -11,11 +11,14 @@ import {
   FileSignature,
   BellRing,
   CalendarCheck,
+  ListTodo,
+  Plus,
 } from 'lucide-react';
 import { useAqar } from '../context/AqarContext';
 import { formatCurrency, formatDateTime, formatGregorian, formatHijri } from '../utils/formatters';
+import { triggerHaptic } from '../utils/haptics';
 import { ReceiptModal } from './ReceiptModal';
-import { Payment } from '../types/aqar';
+import { Payment, TaskItem } from '../types/aqar';
 import {
   AlertCategory,
   DashboardAlertsOverlay,
@@ -113,6 +116,7 @@ export function DashboardView() {
   const todayHijri = formatHijri(new Date().toISOString());
 
   const handleExpenseDecision = async (expenseId: string, decision: 'approve' | 'reject') => {
+    triggerHaptic(decision === 'approve' ? 'success' : 'warning');
     const res = await mutate(
       'POST',
       `/api/expenses/${expenseId}/decision`,
@@ -135,6 +139,29 @@ export function DashboardView() {
           : lang === 'ar'
           ? 'تم رفض المصروف'
           : 'Expense rejected'
+      );
+    }
+  };
+
+  const handleToggleTodayTask = async (task: TaskItem) => {
+    const nextStatus: TaskItem['status'] = task.status === 'مكتملة' ? 'قيد التنفيذ' : 'مكتملة';
+    triggerHaptic(nextStatus === 'مكتملة' ? 'success' : 'light');
+    const res = await mutate(
+      'PATCH',
+      `/api/tasks/${task.id}`,
+      { status: nextStatus },
+      { offlineDescAr: `تحديث مهمة ${task.title}` }
+    );
+    if (res) {
+      pushToast(
+        'success',
+        nextStatus === 'مكتملة'
+          ? lang === 'ar'
+            ? `تم إنجاز المهمة: ${task.title}`
+            : `Task completed: ${task.title}`
+          : lang === 'ar'
+          ? 'تمت إعادة فتح المهمة'
+          : 'Task reopened'
       );
     }
   };
@@ -263,12 +290,19 @@ export function DashboardView() {
         </div>
       )}
 
-      {/* Role-Specific Primary KPI Row */}
+      {/* Role-Specific Interactive Primary KPI Row (Clickable Cards) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        {/* KPI 1 */}
-        <div className="p-5 rounded-2xl border border-slate-200 dark:border-white/10 glass-surface">
+        {/* KPI 1 — Clickable Occupancy / Tickets */}
+        <button
+          type="button"
+          onClick={() => {
+            triggerHaptic('light');
+            setActiveNav(role === 'technician' ? 'maintenance' : 'properties');
+          }}
+          className="text-start p-5 rounded-2xl border border-slate-200/80 dark:border-white/10 glass-surface glass-card-interactive hover:border-[#26478D]/50 cursor-pointer group"
+        >
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>
+            <span className="font-medium">
               {role === 'technician'
                 ? lang === 'ar'
                   ? 'البلاغات المفتوحة'
@@ -277,7 +311,10 @@ export function DashboardView() {
                 ? 'نسبة الإشغال الفعلي'
                 : 'Occupancy Rate'}
             </span>
-            <Building2 className="w-4 h-4 text-[#26478D] dark:text-blue-400" />
+            <span className="inline-flex items-center gap-1 text-[#26478D] dark:text-blue-400">
+              <Building2 className="w-4 h-4" />
+              <ArrowUpLeft className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+            </span>
           </div>
           {role === 'technician' ? (
             <>
@@ -289,21 +326,52 @@ export function DashboardView() {
               </div>
             </>
           ) : (
-            <>
-              <div className="text-2xl font-bold font-mono-num mt-2">{metrics.occupancyRate}%</div>
-              <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                {lang === 'ar'
-                  ? `${metrics.leasedUnits} مؤجرة · ${metrics.vacantUnits} شاغرة من أصل ${metrics.totalUnits}`
-                  : `${metrics.leasedUnits} leased · ${metrics.vacantUnits} vacant of ${metrics.totalUnits}`}
+            <div className="flex items-center justify-between gap-3 mt-2">
+              <div>
+                <div className="text-2xl font-bold font-mono-num">{metrics.occupancyRate}%</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  {lang === 'ar'
+                    ? `${metrics.leasedUnits} مؤجرة · ${metrics.vacantUnits} شاغرة`
+                    : `${metrics.leasedUnits} leased · ${metrics.vacantUnits} vacant`}
+                </div>
               </div>
-            </>
+              {/* Animated SVG Occupancy Ring */}
+              <svg className="w-12 h-12 -rotate-90 shrink-0" viewBox="0 0 44 44" aria-hidden="true">
+                <circle
+                  cx="22"
+                  cy="22"
+                  r="17"
+                  fill="none"
+                  className="stroke-slate-200 dark:stroke-white/10"
+                  strokeWidth="4.5"
+                />
+                <circle
+                  cx="22"
+                  cy="22"
+                  r="17"
+                  fill="none"
+                  className="stroke-[#26478D] dark:stroke-blue-400 transition-all duration-500"
+                  strokeWidth="4.5"
+                  strokeLinecap="round"
+                  strokeDasharray={2 * Math.PI * 17}
+                  strokeDashoffset={2 * Math.PI * 17 * (1 - metrics.occupancyRate / 100)}
+                />
+              </svg>
+            </div>
           )}
-        </div>
+        </button>
 
-        {/* KPI 2 */}
-        <div className="p-5 rounded-2xl border border-slate-200 dark:border-white/10 glass-surface">
+        {/* KPI 2 — Clickable Collections / Active Tasks */}
+        <button
+          type="button"
+          onClick={() => {
+            triggerHaptic('light');
+            setActiveNav(role === 'technician' ? 'maintenance' : 'finance');
+          }}
+          className="text-start p-5 rounded-2xl border border-slate-200/80 dark:border-white/10 glass-surface glass-card-interactive hover:border-emerald-500/50 cursor-pointer group"
+        >
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>
+            <span className="font-medium">
               {role === 'technician'
                 ? lang === 'ar'
                   ? 'المهام النشطة'
@@ -312,7 +380,10 @@ export function DashboardView() {
                 ? 'إجمالي التحصيل الفعلي'
                 : 'Total Collected'}
             </span>
-            <Wallet className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+              <Wallet className="w-4 h-4" />
+              <ArrowUpLeft className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+            </span>
           </div>
           {role === 'technician' ? (
             <>
@@ -335,12 +406,19 @@ export function DashboardView() {
               </div>
             </>
           )}
-        </div>
+        </button>
 
-        {/* KPI 3 */}
-        <div className="p-5 rounded-2xl border border-slate-200 dark:border-white/10 glass-surface">
+        {/* KPI 3 — Clickable Overdue / Leads */}
+        <button
+          type="button"
+          onClick={() => {
+            triggerHaptic('light');
+            setActiveNav(role === 'leasing' ? 'tenants' : role === 'technician' ? 'maintenance' : 'finance');
+          }}
+          className="text-start p-5 rounded-2xl border border-slate-200/80 dark:border-white/10 glass-surface glass-card-interactive hover:border-amber-500/50 cursor-pointer group"
+        >
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>
+            <span className="font-medium">
               {role === 'leasing'
                 ? lang === 'ar'
                   ? 'العملاء المحتملون'
@@ -353,7 +431,10 @@ export function DashboardView() {
                 ? 'المتأخرات والدفعات المفتوحة'
                 : 'Overdue & Open Balance'}
             </span>
-            <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+            <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+              <AlertTriangle className="w-4 h-4" />
+              <ArrowUpLeft className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+            </span>
           </div>
           {role === 'leasing' ? (
             <>
@@ -383,12 +464,19 @@ export function DashboardView() {
               </div>
             </>
           )}
-        </div>
+        </button>
 
-        {/* KPI 4 */}
-        <div className="p-5 rounded-2xl border border-slate-200 dark:border-white/10 glass-surface">
+        {/* KPI 4 — Clickable Pending Approvals & Maintenance */}
+        <button
+          type="button"
+          onClick={() => {
+            triggerHaptic('light');
+            setActiveNav(role === 'owner' ? 'accounting' : metrics.pendingApprovals.length > 0 ? 'accounting' : 'maintenance');
+          }}
+          className="text-start p-5 rounded-2xl border border-slate-200/80 dark:border-white/10 glass-surface glass-card-interactive hover:border-[#26478D]/50 cursor-pointer group"
+        >
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>
+            <span className="font-medium">
               {role === 'owner'
                 ? lang === 'ar'
                   ? 'المصروفات المعتمدة'
@@ -397,7 +485,10 @@ export function DashboardView() {
                 ? 'طلبات اعتماد وصيانة معلقة'
                 : 'Pending Approvals & Tickets'}
             </span>
-            <Clock className="w-4 h-4 text-[#26478D] dark:text-blue-400" />
+            <span className="inline-flex items-center gap-1 text-[#26478D] dark:text-blue-400">
+              <Clock className="w-4 h-4" />
+              <ArrowUpLeft className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+            </span>
           </div>
           {role === 'owner' ? (
             <>
@@ -418,7 +509,7 @@ export function DashboardView() {
               </div>
             </>
           )}
-        </div>
+        </button>
       </div>
 
       {/* Additional Property Performance Analytics Panel (Recharts) */}
@@ -704,6 +795,76 @@ export function DashboardView() {
             </div>
           </div>
 
+          {/* Interactive Today's Tasks (مهام اليوم مع مربعات تفاعلية) */}
+          {role !== 'owner' && (
+            <div className="rounded-2xl border border-slate-200/80 dark:border-white/10 glass-surface overflow-hidden">
+              <div className="px-5 py-4 border-b border-slate-200 dark:border-white/10 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ListTodo className="w-4 h-4 text-[#26478D] dark:text-blue-400" />
+                  <h3 className="text-sm font-semibold">
+                    {lang === 'ar' ? 'مهام اليوم والمتابعات' : "Today's Tasks"}
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setActiveNav('maintenance')}
+                  className="text-xs text-[#26478D] dark:text-blue-400 hover:underline cursor-pointer"
+                >
+                  {lang === 'ar' ? 'إدارة المهام' : 'All Tasks'}
+                </button>
+              </div>
+              <div className="divide-y divide-slate-100 dark:divide-white/5">
+                {state.tasks.length === 0 ? (
+                  <div className="p-5 text-xs text-slate-500 text-center">
+                    {lang === 'ar' ? 'لا توجد مهام مجدولة لليوم' : 'No tasks scheduled today'}
+                  </div>
+                ) : (
+                  state.tasks.slice(0, 5).map((task) => {
+                    const isDone = task.status === 'مكتملة';
+                    const prop = state.properties.find((p) => p.id === task.propertyId);
+                    return (
+                      <label
+                        key={task.id}
+                        className="px-5 py-3 flex items-center justify-between gap-3 cursor-pointer hover:bg-slate-50/70 dark:hover:bg-white/[0.03] transition-colors min-h-[48px]"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={isDone}
+                            onChange={() => void handleToggleTodayTask(task)}
+                            className="w-5 h-5 rounded-md accent-emerald-600 cursor-pointer shrink-0"
+                          />
+                          <div className="min-w-0">
+                            <div
+                              className={`text-xs font-semibold truncate ${
+                                isDone ? 'line-through text-slate-400 dark:text-slate-500' : 'text-slate-900 dark:text-slate-100'
+                              }`}
+                            >
+                              {task.title}
+                            </div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                              {prop?.nameAr || task.type} · <span className="font-mono-num">{task.dueDate}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <span
+                          className={`text-[11px] font-semibold shrink-0 ${
+                            isDone
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : task.priority === 'عاجل'
+                              ? 'text-red-600 dark:text-red-400'
+                              : 'text-amber-600 dark:text-amber-400'
+                          }`}
+                        >
+                          {task.status}
+                        </span>
+                      </label>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Daily Operations & Executive Decisions Card */}
           <div className="rounded-2xl border border-slate-200 dark:border-white/10 glass-surface overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-200 dark:border-white/10 flex items-center justify-between">
@@ -785,6 +946,21 @@ export function DashboardView() {
           )}
         </div>
       </div>
+
+      {/* Mobile Thumb-Zone Floating Action Button */}
+      {hasPermission('collect_payments') && (
+        <button
+          type="button"
+          onClick={() => {
+            triggerHaptic('medium');
+            setActiveNav('finance');
+          }}
+          className="lg:hidden fixed bottom-[4.4rem] end-4 z-30 min-h-[48px] px-4 rounded-2xl bg-[#26478D] text-white shadow-xl shadow-[#26478D]/35 inline-flex items-center gap-2 text-xs font-bold cursor-pointer active:scale-95 transition-transform no-print"
+        >
+          <Plus className="w-4 h-4" />
+          <span>{lang === 'ar' ? 'تحصيل سريع' : 'Collect'}</span>
+        </button>
+      )}
 
       {selectedReceipt && <ReceiptModal payment={selectedReceipt} onClose={() => setSelectedReceipt(null)} />}
       <DashboardAlertsOverlay

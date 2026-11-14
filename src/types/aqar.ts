@@ -1,4 +1,14 @@
-export type RoleKey = 'gm' | 'accountant' | 'leasing' | 'supervisor' | 'technician' | 'owner';
+export type RoleKey =
+  | 'sys_owner'
+  | 'gm'
+  | 'supervisor'
+  | 'accountant'
+  | 'leasing'
+  | 'maint_manager'
+  | 'technician'
+  | 'receptionist'
+  | 'auditor'
+  | 'owner';
 export type CurrencyCode = 'SAR' | 'AED' | 'USD' | 'EGP' | 'KWD';
 
 export type PermissionKey =
@@ -20,6 +30,45 @@ export type PermissionKey =
   | 'backup_restore'
   | 'view_audit';
 
+export type PermissionLevel = 'view' | 'create' | 'edit' | 'delete_void' | 'approve';
+
+export type PermissionModuleKey =
+  | 'properties'
+  | 'tenants'
+  | 'contracts'
+  | 'finance'
+  | 'expenses'
+  | 'maintenance'
+  | 'tasks'
+  | 'documents'
+  | 'archive'
+  | 'team'
+  | 'audit'
+  | 'backups';
+
+export type StaffStatusState = 'متصل' | 'مشغول' | 'غير متصل';
+
+export interface StaffSecurityConfig {
+  twoFactorEnabled?: boolean;
+  biometricEnabled?: boolean;
+  failedAttempts?: number;
+  lockedUntil?: string;
+  lastPasswordChangedAt?: string;
+  requirePasswordChange90d?: boolean;
+  tempPasswordSet?: boolean;
+}
+
+export interface StaffNotificationPrefs {
+  dndEnabled?: boolean;
+  dndFrom?: string;
+  dndTo?: string;
+  taskAssigned?: boolean;
+  taskReminder?: boolean;
+  taskApproved?: boolean;
+  taskComment?: boolean;
+  urgentTicket?: boolean;
+}
+
 export interface StaffUser {
   id: string;
   nameAr: string;
@@ -34,6 +83,15 @@ export interface StaffUser {
   ownerId?: string;
   deviceName: string;
   lastActiveAt: string;
+  statusState?: StaffStatusState;
+  specialty?: string;
+  avatarDataUrl?: string;
+  allowedPropertyIds?: string[];
+  customModulePermissions?: Partial<Record<PermissionModuleKey, PermissionLevel[]>>;
+  managerRating?: number;
+  lastActivitySummary?: string;
+  security?: StaffSecurityConfig;
+  notificationPrefs?: StaffNotificationPrefs;
 }
 
 export type PropertyType = 'سكني' | 'تجاري' | 'إداري' | 'مختلط';
@@ -45,6 +103,32 @@ export interface OwnerShare {
 }
 
 export type PropertyOwnershipMode = 'مملوك للشركة' | 'إدارة للغير' | 'ملكية مشتركة';
+
+export type ArchiveCategoryId = 'contracts' | 'tenants' | 'receipts' | 'tickets' | 'documents' | 'units';
+export type ArchiveMode = 'تلقائي' | 'يدوي' | 'مجدول';
+
+export interface ArchiveMetadata {
+  archivedAt?: string;
+  archiveReason?: string;
+  archivedBy?: string;
+  archiveMode?: ArchiveMode;
+  preArchiveStatus?: string;
+  restoredAsReference?: boolean;
+}
+
+export interface SavedArchiveFilter {
+  id: string;
+  name: string;
+  category: ArchiveCategoryId | 'all';
+  propertyId?: string;
+  tenantId?: string;
+  year?: string;
+  minAmount?: number;
+  timeframe?: 'all' | 'this_month' | 'this_year';
+  query?: string;
+  createdBy: string;
+  createdAt: string;
+}
 
 export interface Property {
   id: string;
@@ -113,6 +197,11 @@ export interface Unit {
   linkedTenantId?: string;
   vacantSince?: string;
   notes?: string;
+  archivedAt?: string;
+  archiveReason?: string;
+  archivedBy?: string;
+  archiveMode?: ArchiveMode;
+  preArchiveStatus?: string;
 }
 
 export interface Owner {
@@ -164,6 +253,11 @@ export interface Tenant {
   onboardingChecklist?: TenantOnboardingChecklist;
   notes?: string;
   createdAt: string;
+  archivedAt?: string;
+  archiveReason?: string;
+  archivedBy?: string;
+  archiveMode?: ArchiveMode;
+  preArchiveStatus?: string;
 }
 
 export interface Lead {
@@ -219,6 +313,12 @@ export interface LeaseContract {
   createdBy: string;
   createdAt: string;
   notes?: string;
+  archivedAt?: string;
+  archiveReason?: string;
+  archivedBy?: string;
+  archiveMode?: ArchiveMode;
+  preArchiveStatus?: string;
+  restoredAsReference?: boolean;
 }
 
 export interface HandoverChecklistItem {
@@ -303,6 +403,11 @@ export interface Payment {
   signatureDataUrl?: string;
   notes?: string;
   createdAt: string;
+  archivedAt?: string;
+  archiveReason?: string;
+  archivedBy?: string;
+  archiveMode?: ArchiveMode;
+  preArchiveStatus?: string;
 }
 
 export interface Account {
@@ -408,6 +513,13 @@ export interface MaintenanceTicket {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
+  archiveReason?: string;
+  archivedBy?: string;
+  archiveMode?: ArchiveMode;
+  preArchiveStatus?: string;
+  beforeNote?: string;
+  afterNote?: string;
 }
 
 export type TaskStatus = 'جديدة' | 'مسندة' | 'قيد التنفيذ' | 'بانتظار المراجعة' | 'مكتملة' | 'معلقة';
@@ -440,19 +552,65 @@ export interface TaskItem {
   comments: TaskComment[];
   linkedTicketId?: string;
   createdAt: string;
+  isQueued?: boolean;
+  smartAssignedReason?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  rejectedReason?: string;
+  completedAt?: string;
+  estimatedHours?: number;
+  actualHours?: number;
+  photoNotes?: string[];
+  archivedAt?: string;
+  archiveReason?: string;
+  archivedBy?: string;
+  archiveMode?: ArchiveMode;
+  preArchiveStatus?: string;
 }
 
 export interface CommunicationLog {
   id: string;
-  targetType: 'مستأجر' | 'مالك' | 'مورد';
+  targetType: 'مستأجر' | 'مالك' | 'مورد' | 'موظف';
   targetId: string;
   targetName: string;
   channel: 'اتصال هاتفي' | 'رسالة نصية / واتساب' | 'بريد إلكتروني' | 'ملاحظة داخلية';
+  templateId?: string;
   templateUsed?: string;
   language: 'ar' | 'en' | 'bn';
   summary: string;
+  status?: 'مرسل' | 'مقروء';
   sentBy: string;
   createdAt: string;
+}
+
+export type TemplateCategory = 'payment' | 'contract' | 'maintenance' | 'supplier' | 'internal' | 'custom';
+export type TemplateChannel = 'whatsapp' | 'sms' | 'email' | 'internal';
+
+export interface TemplateEditEntry {
+  editedBy: string;
+  editedAt: string;
+  summary: string;
+}
+
+export interface CommunicationTemplate {
+  id: string;
+  name: string;
+  category: TemplateCategory;
+  channel: TemplateChannel;
+  language: 'ar' | 'en';
+  contentAr: string;
+  contentEn?: string;
+  isFavorite?: boolean;
+  isSeasonal?: boolean;
+  usageCount: number;
+  scheduleEnabled?: boolean;
+  scheduleDaysOffset?: number;
+  scheduleTime?: string;
+  allowedRoles?: RoleKey[];
+  createdBy: string;
+  updatedBy?: string;
+  updatedAt: string;
+  editHistory?: TemplateEditEntry[];
 }
 
 export type DocumentCategory =
@@ -563,6 +721,11 @@ export interface DocumentRecord {
   ocrExtracted?: OcrExtractedData;
   accessLog?: DocumentAccessEntry[];
   createdAt: string;
+  archivedAt?: string;
+  archiveReason?: string;
+  archivedBy?: string;
+  archiveMode?: ArchiveMode;
+  preArchiveStatus?: string;
 }
 
 export interface VendorQuote {
@@ -632,6 +795,9 @@ export interface AuditLog {
   userName: string;
   userRole: string;
   deviceName: string;
+  ipAddress?: string;
+  geoLocation?: string;
+  propertyId?: string;
   action: string;
   entityType: string;
   entityId: string;
@@ -640,6 +806,43 @@ export interface AuditLog {
   newValue?: string;
   reason?: string;
   createdAt: string;
+}
+
+export interface LoginAuditEntry {
+  id: string;
+  userId: string;
+  userName: string;
+  userRole: string;
+  deviceName: string;
+  ipAddress: string;
+  geoLocation?: string;
+  method: 'كلمة المرور' | 'بصمة / Face ID' | 'مصادقة ثنائية (2FA)' | 'تسجيل خروج عن بُعد';
+  success: boolean;
+  createdAt: string;
+}
+
+export interface SyncConflictRecord {
+  id: string;
+  entityType: string;
+  entityId: string;
+  entityLabel: string;
+  firstActorName: string;
+  secondActorName: string;
+  firstChangeSummary: string;
+  secondChangeSummary: string;
+  status: 'بانتظار مراجعة المدير' | 'تم اعتماد التعديل الأحدث' | 'تم الإبقاء على النسخة السابقة';
+  resolvedBy?: string;
+  resolvedAt?: string;
+  createdAt: string;
+}
+
+export interface SecurityPolicy {
+  minPasswordLength: number;
+  requireSpecialChars: boolean;
+  passwordExpiryDays: number;
+  autoLockMinutes: number;
+  maxFailedAttempts: number;
+  require2faForManagersAndAccountants: boolean;
 }
 
 export interface BackupSnapshot {
@@ -705,6 +908,124 @@ export interface CompanyProfile {
   isDefault?: boolean;
 }
 
+export interface BankAccountConfig {
+  id: string;
+  bankName: string;
+  iban: string;
+  accountHolder: string;
+  isDefault: boolean;
+  showOnReceipts: boolean;
+}
+
+export interface ReceiptBrandingConfig {
+  layout: 'portrait' | 'landscape';
+  showLogo: boolean;
+  showVat: boolean;
+  showQr: boolean;
+  showSignature: boolean;
+  showWatermark: boolean;
+  accentColor: string;
+}
+
+export interface GeneralPreferencesConfig {
+  language: 'ar' | 'en';
+  rtlAuto: boolean;
+  currency: CurrencyCode;
+  calendar: 'gregorian' | 'hijri' | 'both';
+  dateFormat: 'DD/MM/YYYY' | 'YYYY-MM-DD';
+  numeralFormat: 'ar' | 'en';
+  timezone: string;
+  themeMode: 'dark' | 'light' | 'system';
+}
+
+export interface AppSecurityCenterConfig {
+  lockMethod: 'pin' | 'fingerprint' | 'face' | 'pattern';
+  patternCode?: string;
+  autoLockTiming: 'immediate' | '1m' | '5m' | '15m' | '30m';
+  requirePinBeforeDeleteReceipt: boolean;
+  requirePinBeforeCancelPayment: boolean;
+  requirePinBeforeEditContract: boolean;
+  requirePinBeforeExportData: boolean;
+}
+
+export interface NotificationCenterConfig {
+  inApp: {
+    rentDueBefore: boolean;
+    rentDueDay: boolean;
+    rentDueAfter: boolean;
+    contractExpiry: boolean;
+    maintenanceTickets: boolean;
+    assignedTasks: boolean;
+    syncUpdates: boolean;
+  };
+  push: {
+    rentDue: boolean;
+    contractExpiry: boolean;
+    maintenance: boolean;
+    tasks: boolean;
+    sync: boolean;
+  };
+  workHoursEnabled: boolean;
+  workHoursStart: string;
+  workHoursEnd: string;
+  whatsappAutoEnabled: boolean;
+  whatsappDefaultTemplates: {
+    rentDueId?: string;
+    receiptId?: string;
+    maintenanceId?: string;
+    contractId?: string;
+  };
+}
+
+export interface DiscoveredPrinter {
+  id: string;
+  name: string;
+  connection: 'Bluetooth' | 'USB' | 'Network';
+  address: string;
+}
+
+export interface PrintShareConfig {
+  discoveredPrinters: DiscoveredPrinter[];
+  defaultPrinters: {
+    receipts?: string;
+    reports?: string;
+    documents?: string;
+  };
+  paperSize: 'A4' | 'A5' | 'thermal_80' | 'thermal_58';
+  printQuality: 'draft' | 'normal' | 'high';
+  defaultShareChannel: 'whatsapp' | 'email' | 'pdf' | 'native';
+}
+
+export interface BackupPolicyConfig {
+  frequency: 'daily' | 'weekly' | 'monthly' | 'manual';
+  scheduledTime: string;
+  storageTarget: 'device' | 'custom_folder' | 'nas' | 'cloud';
+  customPath: string;
+  encryptBackups: boolean;
+}
+
+export interface SyncCenterConfig {
+  mode: 'local_only' | 'private_server' | 'lan';
+  serverHost: string;
+  serverPort: number;
+  protocol: 'https' | 'http' | 'wss';
+  behavior: 'auto' | 'manual' | 'wifi_only';
+  conflictResolution: 'latest_wins' | 'current_device' | 'manual_review';
+}
+
+export interface DeveloperErrorEntry {
+  id: string;
+  timestamp: string;
+  source: string;
+  message: string;
+  severity: 'info' | 'warn' | 'error';
+}
+
+export interface DeveloperCenterConfig {
+  tempCacheSizeKb: number;
+  errorLogs: DeveloperErrorEntry[];
+}
+
 export interface CompanySettings {
   nameAr: string;
   nameEn: string;
@@ -712,7 +1033,11 @@ export interface CompanySettings {
   vatNumber: string;
   crNumber: string;
   city: string;
+  address?: string;
+  mapLat?: number;
+  mapLng?: number;
   phone: string;
+  whatsapp?: string;
   email: string;
   ejarApiMode: 'PDF + مطابقة يدوية' | 'تكامل إيجار المعتمد';
   zatcaPhase: 'المرحلة الأولى (QR + أرشفة)' | 'المرحلة الثانية (الربط والتكامل)';
@@ -722,6 +1047,15 @@ export interface CompanySettings {
   baseCurrency?: CurrencyCode;
   currencyRatesToSar?: Record<CurrencyCode, number>;
   dateCalendar?: 'هجري وميلادي' | 'ميلادي فقط';
+  bankAccounts?: BankAccountConfig[];
+  receiptBranding?: ReceiptBrandingConfig;
+  generalPrefs?: GeneralPreferencesConfig;
+  securityCenter?: AppSecurityCenterConfig;
+  notificationsCenter?: NotificationCenterConfig;
+  printShare?: PrintShareConfig;
+  backupPolicy?: BackupPolicyConfig;
+  syncCenter?: SyncCenterConfig;
+  developerCenter?: DeveloperCenterConfig;
 }
 
 export interface AqarDatabaseState {
@@ -762,6 +1096,14 @@ export interface AqarDatabaseState {
     journal: number;
   };
   processedIdempotencyKeys: string[];
+  savedArchiveFilters?: SavedArchiveFilter[];
+  archiveLastNightlyRun?: string;
+  archiveSeeded?: boolean;
+  securityPolicy?: SecurityPolicy;
+  loginHistory?: LoginAuditEntry[];
+  syncConflicts?: SyncConflictRecord[];
+  communicationTemplates?: CommunicationTemplate[];
+  teamSeeded?: boolean;
   lastUpdatedAt: string;
 }
 

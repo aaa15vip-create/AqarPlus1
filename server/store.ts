@@ -2,9 +2,11 @@ import fs from 'fs';
 import path from 'path';
 import {
   AqarDatabaseState,
+  ArchiveCategoryId,
   AuditLog,
   BackupSnapshot,
   CommunicationLog,
+  CommunicationTemplate,
   CompanyProfile,
   CompanySettings,
   CurrencyCode,
@@ -17,6 +19,7 @@ import {
   JournalEntry,
   Lead,
   LeaseContract,
+  LoginAuditEntry,
   MaintenanceTicket,
   NotificationItem,
   OcrEntityMatchResult,
@@ -27,13 +30,21 @@ import {
   PaymentMethod,
   PaymentType,
   PermissionKey,
+  PermissionLevel,
+  PermissionModuleKey,
   Property,
   PurchaseOrder,
   ReminderChannel,
   ReminderDispatchLog,
   ReminderRule,
   RoleKey,
+  SavedArchiveFilter,
+  SecurityPolicy,
+  StaffNotificationPrefs,
+  StaffSecurityConfig,
+  StaffStatusState,
   StaffUser,
+  SyncConflictRecord,
   TaskItem,
   Tenant,
   TenantOnboardingChecklist,
@@ -41,7 +52,7 @@ import {
   UnitStatus,
   Vendor,
 } from '../src/types/aqar';
-import { createInitialSeed } from './seed';
+import { createInitialSeed, DEFAULT_ROLE_PERMISSIONS } from './seed';
 
 const RATES_TO_SAR: Record<CurrencyCode, number> = {
   SAR: 1,
@@ -94,10 +105,37 @@ function pad3(n: number): string {
 
 export class AqarStore {
   private state: AqarDatabaseState;
+  private propIndex = new Map<string, Property>();
+  private unitIndex = new Map<string, Unit>();
+  private tenantIndex = new Map<string, Tenant>();
+  private contractIndex = new Map<string, LeaseContract>();
+  private idempotencyIndex = new Set<string>();
 
   constructor() {
     ensureDirs();
     this.state = this.loadFromDisk();
+    this.rebuildIndexes();
+  }
+
+  private rebuildIndexes() {
+    this.propIndex = new Map(this.state.properties.map((p) => [p.id, p]));
+    this.unitIndex = new Map(this.state.units.map((u) => [u.id, u]));
+    this.tenantIndex = new Map(this.state.tenants.map((t) => [t.id, t]));
+    this.contractIndex = new Map(this.state.contracts.map((c) => [c.id, c]));
+    this.idempotencyIndex = new Set(this.state.processedIdempotencyKeys || []);
+  }
+
+  private runTransaction<T>(fn: () => T): T {
+    const snapshot = structuredClone(this.state);
+    try {
+      const result = fn();
+      this.rebuildIndexes();
+      return result;
+    } catch (err) {
+      this.state = snapshot;
+      this.rebuildIndexes();
+      throw err;
+    }
   }
 
   private loadFromDisk(): AqarDatabaseState {
@@ -107,9 +145,58 @@ export class AqarStore {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         const parsed = JSON.parse(raw) as AqarDatabaseState;
         if (parsed && Array.isArray(parsed.properties) && Array.isArray(parsed.users)) {
+          const mergeMissingById = <T extends { id: string }>(existing: T[] = [], seedItems: T[] = []): T[] => {
+            const seen = new Set(existing.map((x) => x.id));
+            return [...existing, ...seedItems.filter((item) => !seen.has(item.id))];
+          };
+          const shouldSeedArchive = !parsed.archiveSeeded && parsed.properties.length > 0;
+          const shouldSeedTeam = !parsed.teamSeeded && parsed.users.length > 0;
+          const mergedUsers: StaffUser[] = shouldSeedTeam
+            ? [
+                ...parsed.users.map((u) => {
+                  const seedMatch = seed.users.find((su) => su.id === u.id);
+                  return {
+                    ...seedMatch,
+                    ...u,
+                    statusState: u.statusState || seedMatch?.statusState || 'متصل',
+                    specialty: u.specialty || seedMatch?.specialty,
+                    managerRating: u.managerRating ?? seedMatch?.managerRating ?? 4.8,
+                    lastActivitySummary: u.lastActivitySummary || seedMatch?.lastActivitySummary,
+                    security: u.security || seedMatch?.security,
+                    notificationPrefs: u.notificationPrefs || seedMatch?.notificationPrefs,
+                  };
+                }),
+                ...seed.users.filter((su) => !parsed.users.some((pu) => pu.id === su.id)),
+              ]
+            : parsed.users;
+          const mergedRolePermissions: Record<RoleKey, PermissionKey[]> = {
+            ...DEFAULT_ROLE_PERMISSIONS,
+            ...(parsed.rolePermissions || {}),
+          };
           return {
             ...seed,
             ...parsed,
+            users: mergedUsers,
+            rolePermissions: mergedRolePermissions,
+            units: shouldSeedArchive ? mergeMissingById(parsed.units, seed.units) : parsed.units,
+            tenants: shouldSeedArchive ? mergeMissingById(parsed.tenants, seed.tenants) : parsed.tenants,
+            contracts: shouldSeedArchive ? mergeMissingById(parsed.contracts, seed.contracts) : parsed.contracts,
+            payments: shouldSeedArchive ? mergeMissingById(parsed.payments, seed.payments) : parsed.payments,
+            tickets: shouldSeedArchive ? mergeMissingById(parsed.tickets, seed.tickets) : parsed.tickets,
+            tasks: shouldSeedArchive ? mergeMissingById(parsed.tasks, seed.tasks) : parsed.tasks,
+            documents: shouldSeedArchive ? mergeMissingById(parsed.documents, seed.documents) : parsed.documents,
+            savedArchiveFilters:
+              Array.isArray(parsed.savedArchiveFilters) && parsed.savedArchiveFilters.length > 0
+                ? parsed.savedArchiveFilters
+                : shouldSeedArchive
+                ? seed.savedArchiveFilters
+                : [],
+            archiveLastNightlyRun: parsed.archiveLastNightlyRun || seed.archiveLastNightlyRun,
+            archiveSeeded: parsed.archiveSeeded ?? true,
+            securityPolicy: parsed.securityPolicy || seed.securityPolicy,
+            loginHistory: Array.isArray(parsed.loginHistory) && parsed.loginHistory.length > 0 ? parsed.loginHistory : seed.loginHistory,
+            syncConflicts: Array.isArray(parsed.syncConflicts) && parsed.syncConflicts.length > 0 ? parsed.syncConflicts : seed.syncConflicts,
+            teamSeeded: parsed.teamSeeded ?? true,
             settings: {
               ...seed.settings,
               ...(parsed.settings || {}),
@@ -117,12 +204,52 @@ export class AqarStore {
                 ...seed.settings.currencyRatesToSar,
                 ...(parsed.settings?.currencyRatesToSar || {}),
               } as Record<CurrencyCode, number>,
+              bankAccounts:
+                Array.isArray(parsed.settings?.bankAccounts) && parsed.settings.bankAccounts.length > 0
+                  ? parsed.settings.bankAccounts
+                  : seed.settings.bankAccounts,
+              receiptBranding: {
+                ...seed.settings.receiptBranding!,
+                ...(parsed.settings?.receiptBranding || {}),
+              },
+              generalPrefs: {
+                ...seed.settings.generalPrefs!,
+                ...(parsed.settings?.generalPrefs || {}),
+              },
+              securityCenter: {
+                ...seed.settings.securityCenter!,
+                ...(parsed.settings?.securityCenter || {}),
+              },
+              notificationsCenter: {
+                ...seed.settings.notificationsCenter!,
+                ...(parsed.settings?.notificationsCenter || {}),
+              },
+              printShare: {
+                ...seed.settings.printShare!,
+                ...(parsed.settings?.printShare || {}),
+              },
+              backupPolicy: {
+                ...seed.settings.backupPolicy!,
+                ...(parsed.settings?.backupPolicy || {}),
+              },
+              syncCenter: {
+                ...seed.settings.syncCenter!,
+                ...(parsed.settings?.syncCenter || {}),
+              },
+              developerCenter: {
+                ...seed.settings.developerCenter!,
+                ...(parsed.settings?.developerCenter || {}),
+              },
             },
             companies: Array.isArray(parsed.companies) && parsed.companies.length > 0 ? parsed.companies : seed.companies,
             purchaseOrders: Array.isArray(parsed.purchaseOrders) ? parsed.purchaseOrders : seed.purchaseOrders,
             decisions: Array.isArray(parsed.decisions) ? parsed.decisions : seed.decisions,
             reminderRules: Array.isArray(parsed.reminderRules) ? parsed.reminderRules : seed.reminderRules,
             reminderLogs: Array.isArray(parsed.reminderLogs) ? parsed.reminderLogs : seed.reminderLogs,
+            communicationTemplates:
+              Array.isArray(parsed.communicationTemplates) && parsed.communicationTemplates.length > 0
+                ? parsed.communicationTemplates
+                : seed.communicationTemplates,
           };
         }
       }
@@ -139,6 +266,9 @@ export class AqarStore {
     const tmpFile = `${DB_FILE}.tmp`;
     fs.writeFileSync(tmpFile, JSON.stringify(nextState, null, 2), 'utf-8');
     fs.renameSync(tmpFile, DB_FILE);
+    if (nextState === this.state) {
+      this.rebuildIndexes();
+    }
   }
 
   public getState(): AqarDatabaseState {
@@ -148,7 +278,31 @@ export class AqarStore {
   public getStateForUser(userId?: string): AqarDatabaseState {
     if (!userId) return this.state;
     const user = this.state.users.find((u) => u.id === userId);
-    if (!user || user.role !== 'owner' || !user.ownerId) {
+    if (!user) return this.state;
+
+    // Property-level isolation for staff members when allowedPropertyIds is restricted
+    if (user.role !== 'owner' && user.role !== 'gm' && user.role !== 'sys_owner') {
+      const allowedProps = user.allowedPropertyIds;
+      if (Array.isArray(allowedProps) && allowedProps.length > 0) {
+        const propSet = new Set(allowedProps);
+        const unitSet = new Set(this.state.units.filter((u) => propSet.has(u.propertyId)).map((u) => u.id));
+        const ctrSet = new Set(this.state.contracts.filter((c) => propSet.has(c.propertyId)).map((c) => c.id));
+        return {
+          ...this.state,
+          properties: this.state.properties.filter((p) => propSet.has(p.id)),
+          units: this.state.units.filter((u) => unitSet.has(u.id)),
+          contracts: this.state.contracts.filter((c) => ctrSet.has(c.id)),
+          installments: this.state.installments.filter((i) => propSet.has(i.propertyId)),
+          payments: this.state.payments.filter((p) => propSet.has(p.propertyId)),
+          expenses: this.state.expenses.filter((e) => propSet.has(e.propertyId)),
+          tickets: this.state.tickets.filter((t) => propSet.has(t.propertyId)),
+          tasks: this.state.tasks.filter((t) => !t.propertyId || propSet.has(t.propertyId) || t.assignedTo === user.id),
+        };
+      }
+      return this.state;
+    }
+
+    if (user.role !== 'owner' || !user.ownerId) {
       return this.state;
     }
     // Owner isolation: owner can ONLY see properties they own and related records
@@ -207,14 +361,28 @@ export class AqarStore {
     entityType: string,
     entityId: string,
     summary: string,
-    opts?: { oldValue?: string; newValue?: string; reason?: string; deviceName?: string }
+    opts?: {
+      oldValue?: string;
+      newValue?: string;
+      reason?: string;
+      deviceName?: string;
+      ipAddress?: string;
+      geoLocation?: string;
+      propertyId?: string;
+    }
   ) {
+    const now = new Date().toISOString();
+    user.lastActiveAt = now;
+    user.lastActivitySummary = summary;
     const entry: AuditLog = {
       id: uid('aud'),
       userId: user.id,
       userName: user.nameAr,
       userRole: user.roleLabelAr,
       deviceName: opts?.deviceName || user.deviceName,
+      ipAddress: opts?.ipAddress || '192.168.10.1',
+      geoLocation: opts?.geoLocation || 'الرياض · المملكة العربية السعودية',
+      propertyId: opts?.propertyId,
       action,
       entityType,
       entityId,
@@ -222,7 +390,7 @@ export class AqarStore {
       oldValue: opts?.oldValue,
       newValue: opts?.newValue,
       reason: opts?.reason,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
     };
     this.state.auditLogs.unshift(entry);
     if (this.state.auditLogs.length > 500) {
@@ -317,6 +485,18 @@ export class AqarStore {
 
     const oldStatus = unit.status;
     unit.status = status;
+    if (status === 'موقوفة' || status === 'مؤرشفة') {
+      unit.preArchiveStatus = oldStatus;
+      unit.archivedAt = new Date().toISOString();
+      unit.archivedBy = user.id;
+      unit.archiveMode = 'تلقائي';
+      unit.archiveReason = reason || (status === 'مؤرشفة' ? 'أرشفة وحدة عقارية' : 'إيقاف الوحدة مؤقتاً');
+    } else if (unit.archivedAt) {
+      unit.archivedAt = undefined;
+      unit.archiveReason = undefined;
+      unit.archivedBy = undefined;
+      unit.archiveMode = undefined;
+    }
     if (status === 'شاغرة') {
       unit.linkedTenantId = undefined;
       unit.vacantSince = new Date().toISOString().slice(0, 10);
@@ -382,13 +562,25 @@ export class AqarStore {
     const tenant = this.state.tenants.find((t) => t.id === tenantId);
     if (!tenant) throw new Error('المستأجر غير موجود');
 
-    const hasContracts = this.state.contracts.some((c) => c.tenantId === tenantId);
-    const hasPayments = this.state.payments.some((p) => p.tenantId === tenantId);
-    if (hasContracts || hasPayments) {
-      throw new Error('قاعدة حماية: يمنع حذف ملف مستأجر مرتبط بعقود أو معاملات مالية');
+    const hasActiveContract = this.state.contracts.some(
+      (c) => c.tenantId === tenantId && (c.lifecycleStatus === 'نشط' || c.lifecycleStatus === 'بانتظار التوثيق')
+    );
+    if (hasActiveContract) {
+      throw new Error('قاعدة حماية: يوجد عقد نشط لهذا المستأجر؛ يجب إنهاء العقد أولاً قبل الأرشفة');
     }
-    this.state.tenants = this.state.tenants.filter((t) => t.id !== tenantId);
-    this.addAudit(user, 'حذف مستأجر غير مرتبط مالياً', 'Tenant', tenantId, `حذف المستأجر ${tenant.nameAr}`, { deviceName });
+    // Golden rule: Nothing is ever permanently deleted; everything is archived
+    const prev = tenant.classification;
+    tenant.preArchiveStatus = prev;
+    tenant.classification = 'سابق';
+    tenant.archivedAt = new Date().toISOString();
+    tenant.archivedBy = user.id;
+    tenant.archiveMode = 'يدوي';
+    tenant.archiveReason = tenant.archiveReason || 'نقل لأرشيف المستأجرين السابقين';
+    this.addAudit(user, 'نقل مستأجر للأرشيف الذكي', 'Tenant', tenantId, `أرشفة ملف المستأجر ${tenant.nameAr}`, {
+      oldValue: prev,
+      newValue: 'سابق (مؤرشف)',
+      deviceName,
+    });
     this.persist();
   }
 
@@ -407,9 +599,10 @@ export class AqarStore {
     input: Omit<LeaseContract, 'id' | 'internalNumber' | 'version' | 'createdBy' | 'createdAt' | 'installmentsCount'>,
     deviceName?: string
   ): { contract: LeaseContract; installments: Installment[] } {
+    return this.runTransaction(() => {
     const user = this.assertPermission(userId, 'manage_contracts');
-    const unit = this.state.units.find((u) => u.id === input.unitId);
-    const tenant = this.state.tenants.find((t) => t.id === input.tenantId);
+    const unit = this.unitIndex.get(input.unitId) || this.state.units.find((u) => u.id === input.unitId);
+    const tenant = this.tenantIndex.get(input.tenantId) || this.state.tenants.find((t) => t.id === input.tenantId);
     if (!unit || !tenant) throw new Error('الوحدة أو المستأجر غير موجود');
 
     const activeOnUnit = this.state.contracts.find(
@@ -500,6 +693,7 @@ export class AqarStore {
     );
     this.persist();
     return { contract, installments: createdInstallments };
+    });
   }
 
   public updateContractEjarStatus(
@@ -515,10 +709,19 @@ export class AqarStore {
     if (!contract) throw new Error('العقد غير موجود');
 
     const oldVal = `${contract.lifecycleStatus} / ${contract.ejarStatus}`;
+    const prevLifecycle = contract.lifecycleStatus;
     contract.ejarNumber = ejarNumber;
     contract.ejarStatus = ejarStatus;
     contract.lifecycleStatus = lifecycleStatus;
     contract.version += 1;
+
+    if (lifecycleStatus === 'منتهي' || lifecycleStatus === 'منتهٍ بالإخلاء' || lifecycleStatus === 'ملغي') {
+      contract.preArchiveStatus = prevLifecycle;
+      contract.archivedAt = contract.archivedAt || new Date().toISOString();
+      contract.archivedBy = user.id;
+      contract.archiveMode = 'تلقائي';
+      contract.archiveReason = contract.archiveReason || `تحويل العقد إلى ${lifecycleStatus}`;
+    }
 
     const unit = this.state.units.find((u) => u.id === contract.unitId);
     if (unit && lifecycleStatus === 'نشط') {
@@ -586,17 +789,36 @@ export class AqarStore {
     nextUnitStatus: UnitStatus,
     deviceName?: string
   ): HandoverInspection {
+    return this.runTransaction(() => {
     const user = this.assertPermission(userId, 'approve_expense_supervisor');
     const handover = this.state.handovers.find((h) => h.id === handoverId);
     if (!handover) throw new Error('المحضر غير موجود');
     handover.status = 'معتمد';
     handover.approvedBy = user.id;
 
-    const unit = this.state.units.find((u) => u.id === handover.unitId);
-    const contract = this.state.contracts.find((c) => c.id === handover.contractId);
+    const unit = this.unitIndex.get(handover.unitId) || this.state.units.find((u) => u.id === handover.unitId);
+    const contract = this.contractIndex.get(handover.contractId) || this.state.contracts.find((c) => c.id === handover.contractId);
     if (handover.type === 'إخلاء واستلام') {
       if (contract) {
+        contract.preArchiveStatus = contract.lifecycleStatus;
         contract.lifecycleStatus = 'منتهٍ بالإخلاء';
+        contract.archivedAt = new Date().toISOString();
+        contract.archivedBy = user.id;
+        contract.archiveMode = 'تلقائي';
+        contract.archiveReason = 'انتهاء العقد بمحضر إخلاء واستلام معتمد';
+
+        const tenant = this.tenantIndex.get(contract.tenantId) || this.state.tenants.find((t) => t.id === contract.tenantId);
+        const stillHasOtherActiveContract = this.state.contracts.some(
+          (c) => c.id !== contract.id && c.tenantId === contract.tenantId && (c.lifecycleStatus === 'نشط' || c.lifecycleStatus === 'بانتظار التوثيق')
+        );
+        if (tenant && !stillHasOtherActiveContract) {
+          tenant.preArchiveStatus = tenant.classification;
+          tenant.classification = 'سابق';
+          tenant.archivedAt = new Date().toISOString();
+          tenant.archivedBy = user.id;
+          tenant.archiveMode = 'تلقائي';
+          tenant.archiveReason = `إخلاء الوحدة ${unit?.unitNumber || handover.unitId}`;
+        }
       }
       if (unit) {
         unit.status = nextUnitStatus;
@@ -617,6 +839,7 @@ export class AqarStore {
     );
     this.persist();
     return handover;
+    });
   }
 
   // 5. Payments, Partial Allocation, Receipts & Reversal
@@ -636,20 +859,21 @@ export class AqarStore {
     },
     deviceName?: string
   ): Payment {
+    return this.runTransaction(() => {
     const user = this.assertPermission(userId, 'collect_payments');
 
-    // Idempotency protection against duplicate sync / double click
-    if (this.state.processedIdempotencyKeys.includes(input.idempotencyKey)) {
+    // O(1) idempotency protection against duplicate sync / double click
+    if (this.idempotencyIndex.has(input.idempotencyKey) || this.state.processedIdempotencyKeys.includes(input.idempotencyKey)) {
       const existing = this.state.payments.find((p) => p.idempotencyKey === input.idempotencyKey);
       if (existing) return existing;
     }
 
     if (!input.amount || input.amount <= 0) throw new Error('يجب أن يكون المبلغ أكبر من صفر');
 
-    const contract = this.state.contracts.find((c) => c.id === input.contractId);
+    const contract = this.contractIndex.get(input.contractId) || this.state.contracts.find((c) => c.id === input.contractId);
     if (!contract) throw new Error('العقد المحدد غير موجود');
-    const property = this.state.properties.find((p) => p.id === contract.propertyId);
-    const unit = this.state.units.find((u) => u.id === contract.unitId);
+    const property = this.propIndex.get(contract.propertyId) || this.state.properties.find((p) => p.id === contract.propertyId);
+    const unit = this.unitIndex.get(contract.unitId) || this.state.units.find((u) => u.id === contract.unitId);
 
     const allocations: PaymentAllocation[] = [];
     let remainingToAllocate = input.amount;
@@ -796,9 +1020,11 @@ export class AqarStore {
 
     this.persist();
     return payment;
+    });
   }
 
   public reverseReceipt(userId: string, paymentId: string, reason: string, deviceName?: string): Payment {
+    return this.runTransaction(() => {
     const user = this.assertPermission(userId, 'reverse_receipts');
     if (!reason || reason.trim().length < 5) {
       throw new Error('يجب إدخال سبب واضح لإلغاء السند وإصدار حركة عكسية');
@@ -807,8 +1033,13 @@ export class AqarStore {
     if (!original) throw new Error('السند المطلوب غير موجود');
     if (original.status === 'معكوس') throw new Error('هذا السند تم عكسه مسبقاً');
 
+    original.preArchiveStatus = 'معتمد';
     original.status = 'معكوس';
     original.reversalReason = reason;
+    original.archivedAt = new Date().toISOString();
+    original.archivedBy = user.id;
+    original.archiveMode = 'تلقائي';
+    original.archiveReason = `سند ملغى بقيد عكسي: ${reason}`;
 
     // Roll back installment allocations accurately
     for (const alloc of original.allocations) {
@@ -882,6 +1113,7 @@ export class AqarStore {
 
     this.persist();
     return original;
+    });
   }
 
   // 6. Expenses & Multi-Stage Approval
@@ -956,6 +1188,7 @@ export class AqarStore {
     reason?: string,
     deviceName?: string
   ): Expense {
+    return this.runTransaction(() => {
     const user = this.getActingUser(userId);
     const expense = this.state.expenses.find((e) => e.id === expenseId);
     if (!expense) throw new Error('المصروف غير موجود');
@@ -1073,6 +1306,7 @@ export class AqarStore {
     );
     this.persist();
     return expense;
+    });
   }
 
   // 7. Maintenance Tickets & Tasks
@@ -1156,9 +1390,23 @@ export class AqarStore {
     const oldStatus = ticket.status;
     Object.assign(ticket, patch, { updatedAt: new Date().toISOString() });
 
+    if (patch.status === 'مكتمل' || patch.status === 'مغلق') {
+      ticket.preArchiveStatus = oldStatus;
+      ticket.archivedAt = ticket.archivedAt || new Date().toISOString();
+      ticket.archivedBy = user.id;
+      ticket.archiveMode = 'تلقائي';
+      ticket.archiveReason = ticket.archiveReason || `إغلاق بلاغ الصيانة (${patch.status})`;
+    }
     if (ticket.linkedTaskId && (patch.status === 'مكتمل' || patch.status === 'مغلق')) {
       const tsk = this.state.tasks.find((t) => t.id === ticket.linkedTaskId);
-      if (tsk) tsk.status = 'مكتملة';
+      if (tsk) {
+        tsk.preArchiveStatus = tsk.status;
+        tsk.status = 'مكتملة';
+        tsk.archivedAt = tsk.archivedAt || new Date().toISOString();
+        tsk.archivedBy = user.id;
+        tsk.archiveMode = 'تلقائي';
+        tsk.archiveReason = `اكتمل البلاغ المرتبط ${ticket.ticketNumber}`;
+      }
     }
 
     this.addAudit(
@@ -1173,20 +1421,123 @@ export class AqarStore {
     return ticket;
   }
 
-  public createTask(userId: string, input: Omit<TaskItem, 'id' | 'createdBy' | 'createdAt' | 'comments'>, deviceName?: string): TaskItem {
+  private pickSmartAssignee(taskType: string, propertyId?: string): { user?: StaffUser; reason: string } {
+    const typeLower = taskType.toLowerCase();
+    const preferredRoles: RoleKey[] =
+      typeLower.includes('صيانة') || typeLower.includes('تكييف') || typeLower.includes('سباكة')
+        ? ['technician', 'maint_manager', 'supervisor']
+        : typeLower.includes('تأجير') || typeLower.includes('عقد') || typeLower.includes('معاينة')
+        ? ['leasing', 'supervisor', 'receptionist']
+        : typeLower.includes('مالي') || typeLower.includes('تحصيل') || typeLower.includes('فاتورة')
+        ? ['accountant', 'gm']
+        : typeLower.includes('تسليم') || typeLower.includes('إخلاء') || typeLower.includes('استلام')
+        ? ['supervisor', 'leasing']
+        : ['supervisor', 'leasing', 'receptionist', 'gm'];
+
+    const candidates = this.state.users.filter((u) => {
+      if (!u.active || u.role === 'owner' || u.role === 'auditor') return false;
+      if (u.statusState === 'غير متصل') return false;
+      if (propertyId && Array.isArray(u.allowedPropertyIds) && u.allowedPropertyIds.length > 0) {
+        if (!u.allowedPropertyIds.includes(propertyId)) return false;
+      }
+      return true;
+    });
+
+    if (candidates.length === 0) {
+      return { reason: 'لا يوجد موظف متصل متاح حالياً — تم الحفظ في قائمة الانتظار' };
+    }
+
+    const activeLoad = (uidStr: string) =>
+      this.state.tasks.filter((t) => t.assignedTo === uidStr && t.status !== 'مكتملة' && !t.archivedAt).length;
+
+    const scored = candidates
+      .map((u) => {
+        const roleIdx = preferredRoles.indexOf(u.role);
+        const roleScore = roleIdx === -1 ? 10 : roleIdx * 20;
+        const loadScore = activeLoad(u.id) * 15;
+        const statusScore = u.statusState === 'مشغول' ? 25 : 0;
+        return { user: u, score: roleScore + loadScore + statusScore, load: activeLoad(u.id) };
+      })
+      .sort((a, b) => a.score - b.score);
+
+    const best = scored[0];
+    return {
+      user: best.user,
+      reason: `إسناد ذكي لـ ${best.user.nameAr} (${best.user.roleLabelAr}) · عبء العمل الحالي: ${best.load} مهام`,
+    };
+  }
+
+  public createTask(
+    userId: string,
+    input: Omit<TaskItem, 'id' | 'createdBy' | 'createdAt' | 'comments'> & { autoAssignSmart?: boolean },
+    deviceName?: string
+  ): TaskItem {
     const user = this.assertPermission(userId, 'manage_tasks');
+    const { autoAssignSmart, ...rawInput } = input;
+    let finalAssignee = rawInput.assignedTo;
+    let isQueued = false;
+    let smartReason: string | undefined;
+
+    if (autoAssignSmart || !finalAssignee) {
+      const picked = this.pickSmartAssignee(rawInput.type, rawInput.propertyId);
+      if (picked.user) {
+        finalAssignee = picked.user.id;
+        smartReason = picked.reason;
+      } else {
+        finalAssignee = '';
+        isQueued = true;
+        smartReason = picked.reason;
+      }
+    }
+
     const task: TaskItem = {
-      ...input,
+      ...rawInput,
+      assignedTo: finalAssignee,
+      status: isQueued ? 'جديدة' : rawInput.status || (finalAssignee ? 'مسندة' : 'جديدة'),
+      isQueued,
+      smartAssignedReason: smartReason,
       id: uid('tsk'),
       createdBy: user.id,
       comments: [],
       createdAt: new Date().toISOString(),
     };
     this.state.tasks.unshift(task);
-    this.addAudit(user, 'إنشاء مهمة فريق', 'TaskItem', task.id, `إسناد مهمة "${task.title}"`, {
-      deviceName,
-      newValue: task.status,
-    });
+    this.addAudit(
+      user,
+      isQueued ? 'إضافة مهمة لقائمة الانتظار' : 'إنشاء وإسناد مهمة فريق',
+      'TaskItem',
+      task.id,
+      `إسناد مهمة "${task.title}"${smartReason ? ` (${smartReason})` : ''}`,
+      {
+        deviceName,
+        propertyId: task.propertyId,
+        newValue: task.status,
+      }
+    );
+    if (isQueued) {
+      this.addNotification(
+        `مهمة في قائمة الانتظار: ${task.title}`,
+        `Queued Task: ${task.title}`,
+        `لم يتم العثور على موظف متاح حالياً، بانتظار توجيه المدير.`,
+        `No eligible staff available right now; task placed in queue.`,
+        'تشغيلية',
+        ['gm', 'sys_owner', 'supervisor', 'maint_manager'],
+        'team'
+      );
+    } else if (finalAssignee) {
+      const targetUser = this.state.users.find((u) => u.id === finalAssignee);
+      if (targetUser) {
+        this.addNotification(
+          task.priority === 'عاجل' ? `مهمة عاجلة: ${task.title}` : `مهمة جديدة مسندة: ${task.title}`,
+          `New task assigned: ${task.title}`,
+          `تم إسناد مهمة (${task.type}) إلى ${targetUser.nameAr} — الموعد النهائي: ${task.dueDate}`,
+          `Assigned to ${targetUser.nameEn} · Due: ${task.dueDate}`,
+          'تشغيلية',
+          [targetUser.role, 'supervisor', 'gm'],
+          'team'
+        );
+      }
+    }
     this.persist();
     return task;
   }
@@ -1194,7 +1545,9 @@ export class AqarStore {
   public updateTask(
     userId: string,
     taskId: string,
-    patch: Partial<Pick<TaskItem, 'status' | 'checklist' | 'assignedTo'>> & { commentText?: string },
+    patch: Partial<Pick<TaskItem, 'status' | 'checklist' | 'assignedTo' | 'actualHours' | 'photoNotes'>> & {
+      commentText?: string;
+    },
     deviceName?: string
   ): TaskItem {
     const user = this.assertPermission(userId, 'manage_tasks');
@@ -1202,9 +1555,24 @@ export class AqarStore {
     if (!task) throw new Error('المهمة غير موجودة');
     const oldStatus = task.status;
 
-    if (patch.status) task.status = patch.status;
+    if (patch.status) {
+      task.status = patch.status;
+      if (patch.status === 'مكتملة') {
+        task.completedAt = task.completedAt || new Date().toISOString();
+        task.preArchiveStatus = oldStatus;
+        task.archivedAt = task.archivedAt || new Date().toISOString();
+        task.archivedBy = user.id;
+        task.archiveMode = 'تلقائي';
+        task.archiveReason = task.archiveReason || 'إنجاز المهمة بنجاح';
+      }
+    }
     if (patch.checklist) task.checklist = patch.checklist;
-    if (patch.assignedTo) task.assignedTo = patch.assignedTo;
+    if (patch.actualHours !== undefined) task.actualHours = patch.actualHours;
+    if (patch.photoNotes) task.photoNotes = patch.photoNotes;
+    if (patch.assignedTo !== undefined) {
+      task.assignedTo = patch.assignedTo;
+      if (patch.assignedTo) task.isQueued = false;
+    }
     if (patch.commentText) {
       task.comments.push({
         id: uid('cmt'),
@@ -1212,13 +1580,142 @@ export class AqarStore {
         text: patch.commentText,
         createdAt: new Date().toISOString(),
       });
+      const assignee = this.state.users.find((u) => u.id === task.assignedTo);
+      if (assignee && assignee.id !== user.id) {
+        this.addNotification(
+          `تعليق جديد على مهمة: ${task.title}`,
+          `Comment on task: ${task.title}`,
+          `${user.nameAr} أضاف تعليقاً: "${patch.commentText}"`,
+          `${user.nameEn} commented: "${patch.commentText}"`,
+          'تشغيلية',
+          [assignee.role],
+          'team'
+        );
+      }
     }
 
     this.addAudit(user, 'تحديث مهمة', 'TaskItem', task.id, `تحديث المهمة "${task.title}" (${task.status})`, {
       oldValue: oldStatus,
       newValue: task.status,
+      propertyId: task.propertyId,
       deviceName,
     });
+    this.persist();
+    return task;
+  }
+
+  public reassignTask(
+    userId: string,
+    taskId: string,
+    newAssigneeId: string,
+    reason?: string,
+    deviceName?: string
+  ): TaskItem {
+    const user = this.assertPermission(userId, 'manage_tasks');
+    const task = this.state.tasks.find((t) => t.id === taskId);
+    if (!task) throw new Error('المهمة غير موجودة');
+    const targetUser = this.state.users.find((u) => u.id === newAssigneeId && u.active);
+    if (!targetUser) throw new Error('الموظف المستهدف غير متاح');
+
+    const prevAssignee = this.state.users.find((u) => u.id === task.assignedTo);
+    task.assignedTo = targetUser.id;
+    task.isQueued = false;
+    if (task.status === 'جديدة') task.status = 'مسندة';
+    task.smartAssignedReason = `إعادة إسناد يدوية إلى ${targetUser.nameAr}${reason ? ` · ${reason}` : ''}`;
+
+    this.addAudit(
+      user,
+      'إعادة إسناد مهمة',
+      'TaskItem',
+      task.id,
+      `إعادة إسناد المهمة "${task.title}" إلى ${targetUser.nameAr}`,
+      {
+        oldValue: prevAssignee?.nameAr || 'قائمة الانتظار',
+        newValue: targetUser.nameAr,
+        reason,
+        propertyId: task.propertyId,
+        deviceName,
+      }
+    );
+    this.addNotification(
+      `إعادة إسناد مهمة إليك: ${task.title}`,
+      `Task reassigned to you: ${task.title}`,
+      `أُسندت المهمة إلى ${targetUser.nameAr} من قِبل ${user.nameAr}`,
+      `Reassigned to ${targetUser.nameEn} by ${user.nameEn}`,
+      'تشغيلية',
+      [targetUser.role],
+      'team'
+    );
+    this.persist();
+    return task;
+  }
+
+  public reviewTask(
+    userId: string,
+    taskId: string,
+    decision: 'approve' | 'reject',
+    reason?: string,
+    deviceName?: string
+  ): TaskItem {
+    const user = this.assertPermission(userId, 'approve_expense_supervisor');
+    const task = this.state.tasks.find((t) => t.id === taskId);
+    if (!task) throw new Error('المهمة غير موجودة');
+    const oldStatus = task.status;
+    const now = new Date().toISOString();
+    const assignee = this.state.users.find((u) => u.id === task.assignedTo);
+
+    if (decision === 'approve') {
+      task.status = 'مكتملة';
+      task.approvedBy = user.id;
+      task.approvedAt = now;
+      task.completedAt = task.completedAt || now;
+      task.rejectedReason = undefined;
+      task.preArchiveStatus = oldStatus;
+      task.archivedAt = task.archivedAt || now;
+      task.archivedBy = user.id;
+      task.archiveMode = 'تلقائي';
+      task.archiveReason = reason || 'اعتماد وإغلاق المهمة بعد مراجعة المشرف';
+      if (assignee) {
+        this.addNotification(
+          `تم اعتماد المهمة: ${task.title}`,
+          `Task approved: ${task.title}`,
+          `اعتمد ${user.nameAr} إنجاز المهمة وأُغلقت في الأرشيف.`,
+          `${user.nameEn} approved task completion.`,
+          'تشغيلية',
+          [assignee.role],
+          'team'
+        );
+      }
+    } else {
+      task.status = 'قيد التنفيذ';
+      task.rejectedReason = reason || 'يرجى استكمال الملاحظات وإعادة الرفع للمراجعة';
+      task.comments.push({
+        id: uid('cmt'),
+        authorName: user.nameAr,
+        text: `ملاحظة مراجعة: ${task.rejectedReason}`,
+        createdAt: now,
+      });
+      if (assignee) {
+        this.addNotification(
+          `إعادة مهمة للاستكمال: ${task.title}`,
+          `Task returned for follow-up: ${task.title}`,
+          `ملاحظة ${user.nameAr}: ${task.rejectedReason}`,
+          `Review note: ${task.rejectedReason}`,
+          'تشغيلية',
+          [assignee.role],
+          'team'
+        );
+      }
+    }
+
+    this.addAudit(
+      user,
+      decision === 'approve' ? 'اعتماد وإغلاق مهمة' : 'إرجاع مهمة للمراجعة',
+      'TaskItem',
+      task.id,
+      `${decision === 'approve' ? 'اعتماد' : 'إرجاع'} المهمة "${task.title}"`,
+      { oldValue: oldStatus, newValue: task.status, reason, propertyId: task.propertyId, deviceName }
+    );
     this.persist();
     return task;
   }
@@ -1587,14 +2084,39 @@ export class AqarStore {
 
   public updateSettings(userId: string, patch: Partial<CompanySettings>, deviceName?: string): CompanySettings {
     const user = this.assertPermission(userId, 'manage_users');
+    const prev = this.state.settings;
     this.state.settings = {
-      ...this.state.settings,
+      ...prev,
       ...patch,
       currencyRatesToSar: {
         ...RATES_TO_SAR,
-        ...(this.state.settings.currencyRatesToSar || {}),
+        ...(prev.currencyRatesToSar || {}),
         ...(patch.currencyRatesToSar || {}),
       },
+      receiptBranding: patch.receiptBranding
+        ? { ...(prev.receiptBranding || {}), ...patch.receiptBranding } as CompanySettings['receiptBranding']
+        : prev.receiptBranding,
+      generalPrefs: patch.generalPrefs
+        ? { ...(prev.generalPrefs || {}), ...patch.generalPrefs } as CompanySettings['generalPrefs']
+        : prev.generalPrefs,
+      securityCenter: patch.securityCenter
+        ? { ...(prev.securityCenter || {}), ...patch.securityCenter } as CompanySettings['securityCenter']
+        : prev.securityCenter,
+      notificationsCenter: patch.notificationsCenter
+        ? { ...(prev.notificationsCenter || {}), ...patch.notificationsCenter } as CompanySettings['notificationsCenter']
+        : prev.notificationsCenter,
+      printShare: patch.printShare
+        ? { ...(prev.printShare || {}), ...patch.printShare } as CompanySettings['printShare']
+        : prev.printShare,
+      backupPolicy: patch.backupPolicy
+        ? { ...(prev.backupPolicy || {}), ...patch.backupPolicy } as CompanySettings['backupPolicy']
+        : prev.backupPolicy,
+      syncCenter: patch.syncCenter
+        ? { ...(prev.syncCenter || {}), ...patch.syncCenter } as CompanySettings['syncCenter']
+        : prev.syncCenter,
+      developerCenter: patch.developerCenter
+        ? { ...(prev.developerCenter || {}), ...patch.developerCenter } as CompanySettings['developerCenter']
+        : prev.developerCenter,
     };
 
     const defaultComp = (this.state.companies || []).find((c) => c.isDefault) || this.state.companies?.[0];
@@ -1604,14 +2126,22 @@ export class AqarStore {
       if (patch.crNumber) defaultComp.crNumber = patch.crNumber;
       if (patch.vatNumber) defaultComp.vatNumber = patch.vatNumber;
       if (patch.city) defaultComp.city = patch.city;
+      if (patch.address) defaultComp.address = patch.address;
       if (patch.phone) defaultComp.phone = patch.phone;
       if (patch.email) defaultComp.email = patch.email;
       if (patch.logoDataUrl !== undefined) defaultComp.logoDataUrl = patch.logoDataUrl;
     }
 
+    if (patch.securityCenter?.autoLockTiming && this.state.securityPolicy) {
+      const minsMap: Record<string, number> = { immediate: 0, '1m': 1, '5m': 5, '15m': 15, '30m': 30 };
+      if (patch.securityCenter.autoLockTiming in minsMap) {
+        this.state.securityPolicy.autoLockMinutes = minsMap[patch.securityCenter.autoLockTiming];
+      }
+    }
+
     this.addAudit(
       user,
-      'تحديث إعدادات النظام والعملات',
+      'تحديث إعدادات النظام والمركز',
       'CompanySettings',
       'settings',
       `تحديث إعدادات المنشأة والعملة الأساسية (${this.state.settings.baseCurrency || 'SAR'})`,
@@ -1681,6 +2211,7 @@ export class AqarStore {
     },
     deviceName?: string
   ) {
+    return this.runTransaction(() => {
     const user = this.assertPermission(userId, 'manage_accounting');
     const owner = this.state.owners.find((o) => o.id === ownerId);
     if (!owner) throw new Error('المالك غير موجود');
@@ -1734,6 +2265,7 @@ export class AqarStore {
     );
     this.persist();
     return { owner, journal };
+    });
   }
 
   // 13. Fast Contract Renewal (التجديد دون تكرار الإدخال)
@@ -1751,8 +2283,9 @@ export class AqarStore {
     },
     deviceName?: string
   ): { contract: LeaseContract; installments: Installment[] } {
+    return this.runTransaction(() => {
     const user = this.assertPermission(userId, 'manage_contracts');
-    const prev = this.state.contracts.find((c) => c.id === contractId);
+    const prev = this.contractIndex.get(contractId) || this.state.contracts.find((c) => c.id === contractId);
     if (!prev) throw new Error('العقد الأساسي غير موجود');
 
     if (prev.lifecycleStatus === 'نشط' || prev.lifecycleStatus === 'بانتظار التجديد') {
@@ -1837,6 +2370,7 @@ export class AqarStore {
     );
     this.persist();
     return { contract: renewed, installments: createdInstallments };
+    });
   }
 
   // 14. Purchase Orders & Contractor Quotes
@@ -2415,5 +2949,822 @@ export class AqarStore {
       property: linkedProperty,
       doc: linkedDoc,
     };
+  }
+
+  public resetToFreshWorkspace(userId: string, deviceName?: string): AqarDatabaseState {
+    const user = this.assertPermission(userId, 'manage_properties');
+    if (this.state.properties.length > 0 || this.state.payments.length > 0) {
+      this.createBackup(userId, 'نسخة تلقائية قبل الإعداد الأولي', deviceName);
+    }
+
+    this.state.properties = [];
+    this.state.units = [];
+    this.state.tenants = [];
+    this.state.leads = [];
+    this.state.contracts = [];
+    this.state.handovers = [];
+    this.state.installments = [];
+    this.state.payments = [];
+    this.state.journals = [];
+    this.state.expenses = [];
+    this.state.assets = [];
+    this.state.tickets = [];
+    this.state.tasks = [];
+    this.state.communications = [];
+    this.state.documents = [];
+    this.state.purchaseOrders = [];
+    this.state.decisions = [];
+    this.state.notifications = [];
+    this.state.reminderLogs = [];
+    this.state.accounts = this.state.accounts.map((acc) => ({ ...acc, balance: 0 }));
+    this.state.counters = {
+      receipt: 1,
+      contract: 1,
+      ticket: 1,
+      expense: 1,
+      journal: 1,
+    };
+
+    this.addAudit(
+      user,
+      'تهيئة مساحة عمل جديدة',
+      'Workspace',
+      'fresh-onboarding',
+      'بدء مساحة عمل نظيفة عبر رحلة الإعداد الأولي',
+      { deviceName }
+    );
+    this.state.archiveSeeded = true;
+    this.persist();
+    return this.getStateForUser(userId);
+  }
+
+  // 14. Smart Archive Center (Manual Archive, Restore with Conflict Check, Scheduled Job, Saved Filters)
+  private assertArchiveAccess(user: StaffUser, category: ArchiveCategoryId, action: 'view' | 'write'): void {
+    const allowedByRole: Record<RoleKey, ArchiveCategoryId[]> = {
+      sys_owner: ['contracts', 'tenants', 'receipts', 'tickets', 'documents', 'units'],
+      gm: ['contracts', 'tenants', 'receipts', 'tickets', 'documents', 'units'],
+      accountant: ['contracts', 'receipts'],
+      supervisor: ['units', 'tenants'],
+      leasing: ['tenants'],
+      maint_manager: ['tickets', 'units'],
+      technician: ['tickets'],
+      receptionist: ['tenants', 'documents'],
+      auditor: ['contracts', 'tenants', 'receipts', 'tickets', 'documents', 'units'],
+      owner: ['contracts', 'receipts', 'units'],
+    };
+    const allowed = allowedByRole[user.role] || [];
+    if (!allowed.includes(category)) {
+      throw new Error(`لا تملك صلاحية الوصول إلى قسم الأرشيف (${category})`);
+    }
+    if (action === 'write' && (user.role === 'owner' || user.role === 'auditor' || (user.role === 'leasing' && category !== 'tenants'))) {
+      throw new Error('صلاحيتك في هذا القسم للعرض المرجعي فقط');
+    }
+  }
+
+  public archiveEntity(
+    userId: string,
+    input: { category: ArchiveCategoryId; entityId: string; reason?: string; targetKind?: 'ticket' | 'task' },
+    deviceName?: string
+  ): { archivedAt: string; summary: string } {
+    return this.runTransaction(() => {
+      const user = this.getActingUser(userId);
+      this.assertArchiveAccess(user, input.category, 'write');
+      const now = new Date().toISOString();
+      const reason = (input.reason || '').trim() || 'نقل يدوي للأرشيف الذكي';
+      let summary = '';
+
+      if (input.category === 'contracts') {
+        const ctr = this.state.contracts.find((c) => c.id === input.entityId);
+        if (!ctr) throw new Error('العقد غير موجود');
+        ctr.preArchiveStatus = ctr.lifecycleStatus;
+        if (ctr.lifecycleStatus === 'نشط' || ctr.lifecycleStatus === 'بانتظار التجديد' || ctr.lifecycleStatus === 'بانتظار التوثيق') {
+          ctr.lifecycleStatus = 'منتهي';
+          const unit = this.state.units.find((u) => u.id === ctr.unitId);
+          if (unit && unit.status === 'مؤجرة') {
+            unit.status = 'شاغرة';
+            unit.vacantSince = now.slice(0, 10);
+          }
+        }
+        ctr.archivedAt = now;
+        ctr.archivedBy = user.id;
+        ctr.archiveMode = 'يدوي';
+        ctr.archiveReason = reason;
+        summary = `أرشفة العقد ${ctr.internalNumber}`;
+      } else if (input.category === 'tenants') {
+        const ten = this.state.tenants.find((t) => t.id === input.entityId);
+        if (!ten) throw new Error('المستأجر غير موجود');
+        const hasActiveCtr = this.state.contracts.some(
+          (c) => c.tenantId === ten.id && (c.lifecycleStatus === 'نشط' || c.lifecycleStatus === 'بانتظار التوثيق')
+        );
+        if (hasActiveCtr) throw new Error('لا يمكن أرشفة مستأجر لديه عقد نشط حالياً؛ قم بإنهاء أو أرشفة العقد أولاً');
+        ten.preArchiveStatus = ten.classification;
+        ten.classification = 'سابق';
+        ten.archivedAt = now;
+        ten.archivedBy = user.id;
+        ten.archiveMode = 'يدوي';
+        ten.archiveReason = reason;
+        summary = `أرشفة المستأجر ${ten.nameAr}`;
+      } else if (input.category === 'receipts') {
+        const pay = this.state.payments.find((p) => p.id === input.entityId);
+        if (!pay) throw new Error('الإيصال غير موجود');
+        pay.preArchiveStatus = pay.status;
+        pay.archivedAt = now;
+        pay.archivedBy = user.id;
+        pay.archiveMode = 'يدوي';
+        pay.archiveReason = reason;
+        summary = `أرشفة الإيصال ${pay.receiptNumber}`;
+      } else if (input.category === 'tickets') {
+        if (input.targetKind === 'task') {
+          const tsk = this.state.tasks.find((t) => t.id === input.entityId);
+          if (!tsk) throw new Error('المهمة غير موجودة');
+          tsk.preArchiveStatus = tsk.status;
+          tsk.status = 'مكتملة';
+          tsk.archivedAt = now;
+          tsk.archivedBy = user.id;
+          tsk.archiveMode = 'يدوي';
+          tsk.archiveReason = reason;
+          summary = `أرشفة المهمة "${tsk.title}"`;
+        } else {
+          const tkt = this.state.tickets.find((t) => t.id === input.entityId);
+          if (!tkt) throw new Error('البلاغ غير موجود');
+          tkt.preArchiveStatus = tkt.status;
+          if (tkt.status !== 'مكتمل' && tkt.status !== 'مغلق') tkt.status = 'مغلق';
+          tkt.archivedAt = now;
+          tkt.archivedBy = user.id;
+          tkt.archiveMode = 'يدوي';
+          tkt.archiveReason = reason;
+          summary = `أرشفة بلاغ الصيانة ${tkt.ticketNumber}`;
+        }
+      } else if (input.category === 'documents') {
+        const doc = this.state.documents.find((d) => d.id === input.entityId);
+        if (!doc) throw new Error('المستند غير موجود');
+        doc.preArchiveStatus = 'نشط';
+        doc.archivedAt = now;
+        doc.archivedBy = user.id;
+        doc.archiveMode = 'يدوي';
+        doc.archiveReason = reason;
+        summary = `أرشفة المستند "${doc.title}"`;
+      } else if (input.category === 'units') {
+        const unit = this.state.units.find((u) => u.id === input.entityId);
+        if (!unit) throw new Error('الوحدة غير موجودة');
+        const hasActiveCtr = this.state.contracts.some(
+          (c) => c.unitId === unit.id && (c.lifecycleStatus === 'نشط' || c.lifecycleStatus === 'بانتظار التوثيق')
+        );
+        if (hasActiveCtr) throw new Error('لا يمكن إخراج وحدة مؤجرة بعقد نشط للأرشيف قبل إغلاق العقد');
+        unit.preArchiveStatus = unit.status;
+        unit.status = 'مؤرشفة';
+        unit.archivedAt = now;
+        unit.archivedBy = user.id;
+        unit.archiveMode = 'يدوي';
+        unit.archiveReason = reason;
+        summary = `نقل الوحدة ${unit.unitNumber} إلى أرشيف الوحدات المتوقفة`;
+      }
+
+      this.addAudit(user, 'نقل إلى الأرشيف الذكي', input.category, input.entityId, `${summary} — السبب: ${reason}`, {
+        reason,
+        newValue: 'مؤرشف',
+        deviceName,
+      });
+      this.persist();
+      return { archivedAt: now, summary };
+    });
+  }
+
+  public restoreArchivedEntity(
+    userId: string,
+    input: {
+      category: ArchiveCategoryId;
+      entityId: string;
+      referenceOnly?: boolean;
+      reason?: string;
+      targetKind?: 'ticket' | 'task';
+    },
+    deviceName?: string
+  ): { restoredSummary: string; referenceOnly: boolean } {
+    return this.runTransaction(() => {
+      const user = this.getActingUser(userId);
+      this.assertArchiveAccess(user, input.category, 'write');
+      const reason = (input.reason || '').trim() || 'استعادة من الأرشيف الذكي';
+      let restoredSummary = '';
+      let referenceOnly = Boolean(input.referenceOnly);
+
+      if (input.category === 'contracts') {
+        const ctr = this.state.contracts.find((c) => c.id === input.entityId);
+        if (!ctr) throw new Error('العقد غير موجود');
+        const conflictingActive = this.state.contracts.find(
+          (c) =>
+            c.id !== ctr.id &&
+            c.unitId === ctr.unitId &&
+            (c.lifecycleStatus === 'نشط' || c.lifecycleStatus === 'بانتظار التوثيق')
+        );
+        if (conflictingActive && !input.referenceOnly) {
+          throw new Error(
+            `CONFLICT_ACTIVE_CONTRACT: الوحدة مرتبطة حالياً بعقد أحدث (${conflictingActive.internalNumber}). يمكنك استعادته كسجل مرجعي فقط.`
+          );
+        }
+        if (referenceOnly) {
+          ctr.restoredAsReference = true;
+          ctr.archivedAt = undefined;
+          ctr.archiveReason = undefined;
+          ctr.lifecycleStatus = 'منتهي';
+          restoredSummary = `استعادة العقد ${ctr.internalNumber} كسجل مرجعي فقط`;
+        } else {
+          ctr.lifecycleStatus =
+            ctr.preArchiveStatus === 'بانتظار التوثيق' || ctr.preArchiveStatus === 'نشط'
+              ? (ctr.preArchiveStatus as LeaseContract['lifecycleStatus'])
+              : 'بانتظار التجديد';
+          ctr.archivedAt = undefined;
+          ctr.archiveReason = undefined;
+          ctr.restoredAsReference = false;
+          const unit = this.state.units.find((u) => u.id === ctr.unitId);
+          if (unit && ctr.lifecycleStatus === 'نشط') {
+            unit.status = 'مؤجرة';
+          }
+          restoredSummary = `استعادة العقد ${ctr.internalNumber} إلى قائمة العقود (${ctr.lifecycleStatus})`;
+        }
+      } else if (input.category === 'tenants') {
+        const ten = this.state.tenants.find((t) => t.id === input.entityId);
+        if (!ten) throw new Error('المستأجر غير موجود');
+        ten.classification = ten.preArchiveStatus === 'محتمل' ? 'محتمل' : 'نشط';
+        ten.archivedAt = undefined;
+        ten.archiveReason = undefined;
+        restoredSummary = `استعادة ملف المستأجر ${ten.nameAr} إلى السجل النشط`;
+      } else if (input.category === 'receipts') {
+        const pay = this.state.payments.find((p) => p.id === input.entityId);
+        if (!pay) throw new Error('الإيصال غير موجود');
+        if (pay.status === 'معكوس') {
+          referenceOnly = true;
+          pay.archivedAt = undefined;
+          restoredSummary = `استعادة الإيصال المعكوس ${pay.receiptNumber} للعرض المرجعي دون تغيير الأرصدة المحاسبية`;
+        } else {
+          pay.archivedAt = undefined;
+          pay.archiveReason = undefined;
+          restoredSummary = `استعادة الإيصال ${pay.receiptNumber} من الأرشيف المالي`;
+        }
+      } else if (input.category === 'tickets') {
+        if (input.targetKind === 'task') {
+          const tsk = this.state.tasks.find((t) => t.id === input.entityId);
+          if (!tsk) throw new Error('المهمة غير موجودة');
+          tsk.status = 'قيد التنفيذ';
+          tsk.archivedAt = undefined;
+          tsk.archiveReason = undefined;
+          restoredSummary = `إعادة فتح المهمة "${tsk.title}"`;
+        } else {
+          const tkt = this.state.tickets.find((t) => t.id === input.entityId);
+          if (!tkt) throw new Error('البلاغ غير موجود');
+          tkt.status = 'قيد التنفيذ';
+          tkt.archivedAt = undefined;
+          tkt.archiveReason = undefined;
+          tkt.updatedAt = new Date().toISOString();
+          restoredSummary = `إعادة فتح بلاغ الصيانة ${tkt.ticketNumber}`;
+        }
+      } else if (input.category === 'documents') {
+        const doc = this.state.documents.find((d) => d.id === input.entityId);
+        if (!doc) throw new Error('المستند غير موجود');
+        doc.archivedAt = undefined;
+        doc.archiveReason = undefined;
+        restoredSummary = `استعادة المستند "${doc.title}" للمستندات النشطة`;
+      } else if (input.category === 'units') {
+        const unit = this.state.units.find((u) => u.id === input.entityId);
+        if (!unit) throw new Error('الوحدة غير موجودة');
+        unit.status = 'شاغرة';
+        unit.vacantSince = new Date().toISOString().slice(0, 10);
+        unit.archivedAt = undefined;
+        unit.archiveReason = undefined;
+        restoredSummary = `إعادة تفعيل الوحدة ${unit.unitNumber} كوحدة شاغرة`;
+      }
+
+      this.addAudit(user, 'استعادة من الأرشيف الذكي', input.category, input.entityId, `${restoredSummary} — ${reason}`, {
+        reason,
+        newValue: referenceOnly ? 'سجل مرجعي' : 'نشط',
+        deviceName,
+      });
+      this.persist();
+      return { restoredSummary, referenceOnly };
+    });
+  }
+
+  public runScheduledArchival(userId: string, deviceName?: string): { archivedCount: number; summary: string } {
+    return this.runTransaction(() => {
+      const user = this.assertPermission(userId, 'manage_contracts');
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const todayStr = nowIso.slice(0, 10);
+      const oneYearAgoMs = now.getTime() - 365 * 86400000;
+      const thirtyDaysAgoMs = now.getTime() - 30 * 86400000;
+      let count = 0;
+
+      for (const ctr of this.state.contracts) {
+        if (!ctr.archivedAt && (ctr.lifecycleStatus === 'منتهي' || ctr.lifecycleStatus === 'منتهٍ بالإخلاء' || ctr.lifecycleStatus === 'ملغي')) {
+          ctr.archivedAt = nowIso;
+          ctr.archiveMode = 'مجدول';
+          ctr.archiveReason = ctr.archiveReason || 'أرشفة تلقائية لعقد منتهي';
+          count += 1;
+        } else if (!ctr.archivedAt && ctr.endDate < todayStr && !ctr.restoredAsReference && ctr.lifecycleStatus === 'نشط') {
+          ctr.preArchiveStatus = ctr.lifecycleStatus;
+          ctr.lifecycleStatus = 'منتهي';
+          ctr.archivedAt = nowIso;
+          ctr.archiveMode = 'مجدول';
+          ctr.archiveReason = 'انتهاء مدة العقد (أرشفة ليلية مجدولة)';
+          count += 1;
+        }
+      }
+
+      for (const pay of this.state.payments) {
+        const payTime = new Date(pay.createdAt).getTime();
+        if (!pay.archivedAt && (pay.status === 'معكوس' || payTime < oneYearAgoMs)) {
+          pay.archivedAt = nowIso;
+          pay.archiveMode = 'مجدول';
+          pay.archiveReason = pay.status === 'معكوس' ? 'سند معكوس محاسبياً' : 'إقفال سنة مالية سابقة (> سنة)';
+          count += 1;
+        }
+      }
+
+      for (const doc of this.state.documents) {
+        if (!doc.archivedAt && doc.expiryDate && doc.expiryDate < todayStr) {
+          doc.archivedAt = nowIso;
+          doc.archiveMode = 'مجدول';
+          doc.archiveReason = 'انتهاء تاريخ صلاحية الوثيقة';
+          count += 1;
+        }
+      }
+
+      for (const tkt of this.state.tickets) {
+        const updTime = new Date(tkt.updatedAt).getTime();
+        if (!tkt.archivedAt && (tkt.status === 'مكتمل' || tkt.status === 'مغلق') && updTime < thirtyDaysAgoMs) {
+          tkt.archivedAt = nowIso;
+          tkt.archiveMode = 'مجدول';
+          tkt.archiveReason = 'أرشفة دورية لبلاغ منجز';
+          count += 1;
+        }
+      }
+
+      this.state.archiveLastNightlyRun = nowIso;
+      const summary =
+        count > 0
+          ? `تم تنفيذ الجدولة الليلية ونقل ${count} سجل منتهي إلى الأرشيف الذكي`
+          : 'تم فحص كافة السجلات ولا توجد عناصر منتهية جديدة للأرشفة';
+
+      this.addAudit(user, 'تشغيل الأرشفة الليلية المجدولة', 'SmartArchive', 'nightly-job', summary, { deviceName });
+      this.persist();
+      return { archivedCount: count, summary };
+    });
+  }
+
+  public saveArchiveFilter(
+    userId: string,
+    input: Omit<SavedArchiveFilter, 'id' | 'createdBy' | 'createdAt'>,
+    deviceName?: string
+  ): SavedArchiveFilter {
+    const user = this.getActingUser(userId);
+    if (!this.state.savedArchiveFilters) this.state.savedArchiveFilters = [];
+    const filter: SavedArchiveFilter = {
+      ...input,
+      id: uid('af'),
+      createdBy: user.id,
+      createdAt: new Date().toISOString(),
+    };
+    this.state.savedArchiveFilters.unshift(filter);
+    this.addAudit(user, 'حفظ فلتر بحث في الأرشيف', 'SavedArchiveFilter', filter.id, `حفظ الفلتر "${filter.name}"`, {
+      deviceName,
+    });
+    this.persist();
+    return filter;
+  }
+
+  public deleteArchiveFilter(userId: string, filterId: string): void {
+    this.getActingUser(userId);
+    this.state.savedArchiveFilters = (this.state.savedArchiveFilters || []).filter((f) => f.id !== filterId);
+    this.persist();
+  }
+
+  // 15. Team & Workforce Management (Users, 5-Level Permissions, Property Scope, Security Policy, Conflicts)
+  public createStaffUser(
+    userId: string,
+    input: {
+      nameAr: string;
+      nameEn?: string;
+      email: string;
+      phone: string;
+      role: RoleKey;
+      roleLabelAr: string;
+      roleLabelEn: string;
+      specialty?: string;
+      approvalLimitSar?: number;
+      allowedPropertyIds?: string[];
+      customModulePermissions?: Partial<Record<PermissionModuleKey, PermissionLevel[]>>;
+      twoFactorEnabled?: boolean;
+      biometricEnabled?: boolean;
+      avatarDataUrl?: string;
+    },
+    deviceName?: string
+  ): StaffUser {
+    const actor = this.assertPermission(userId, 'manage_users');
+    if (!input.nameAr?.trim() || !input.phone?.trim()) {
+      throw new Error('الاسم الكامل ورقم الجوال مطلوبان لإضافة الموظف');
+    }
+    const now = new Date().toISOString();
+    const newUser: StaffUser = {
+      id: uid('usr'),
+      nameAr: input.nameAr.trim(),
+      nameEn: (input.nameEn || input.nameAr).trim(),
+      role: input.role,
+      roleLabelAr: input.roleLabelAr,
+      roleLabelEn: input.roleLabelEn,
+      email: input.email?.trim() || `staff-${Date.now().toString().slice(-4)}@aqarplus.sa`,
+      phone: input.phone.trim(),
+      approvalLimitSar: Number(input.approvalLimitSar || 0),
+      active: true,
+      deviceName: 'جهاز مسجل جديد · ويب/جوال',
+      lastActiveAt: now,
+      statusState: 'متصل',
+      specialty: input.specialty?.trim() || input.roleLabelAr,
+      avatarDataUrl: input.avatarDataUrl,
+      allowedPropertyIds: input.allowedPropertyIds && input.allowedPropertyIds.length > 0 ? input.allowedPropertyIds : undefined,
+      customModulePermissions: input.customModulePermissions,
+      managerRating: 5,
+      lastActivitySummary: 'تم إنشاء الحساب وتفعيل الصلاحيات',
+      security: {
+        twoFactorEnabled: Boolean(input.twoFactorEnabled),
+        biometricEnabled: Boolean(input.biometricEnabled),
+        failedAttempts: 0,
+        lastPasswordChangedAt: now,
+        requirePasswordChange90d: true,
+        tempPasswordSet: true,
+      },
+      notificationPrefs: {
+        dndEnabled: false,
+        taskAssigned: true,
+        taskReminder: true,
+        taskApproved: true,
+        taskComment: true,
+        urgentTicket: true,
+      },
+    };
+    this.state.users.push(newUser);
+    this.addAudit(
+      actor,
+      'إضافة موظف جديد',
+      'StaffUser',
+      newUser.id,
+      `إضافة الموظف ${newUser.nameAr} بدور (${newUser.roleLabelAr})${newUser.allowedPropertyIds ? ` · مقيد بـ ${newUser.allowedPropertyIds.length} عقارات` : ''}`,
+      { newValue: newUser.roleLabelAr, deviceName }
+    );
+    this.addNotification(
+      `انضمام موظف جديد: ${newUser.nameAr}`,
+      `New staff added: ${newUser.nameEn}`,
+      `تمت إضافة ${newUser.nameAr} (${newUser.roleLabelAr}) وإرسال بيانات الدخول المؤقتة.`,
+      `${newUser.nameEn} joined as ${newUser.roleLabelEn}.`,
+      'إدارية',
+      ['gm', 'sys_owner'],
+      'team'
+    );
+    this.persist();
+    return newUser;
+  }
+
+  public updateStaffUser(
+    userId: string,
+    targetUserId: string,
+    patch: {
+      nameAr?: string;
+      nameEn?: string;
+      email?: string;
+      phone?: string;
+      role?: RoleKey;
+      roleLabelAr?: string;
+      roleLabelEn?: string;
+      specialty?: string;
+      approvalLimitSar?: number;
+      active?: boolean;
+      statusState?: StaffStatusState;
+      managerRating?: number;
+      allowedPropertyIds?: string[];
+      customModulePermissions?: Partial<Record<PermissionModuleKey, PermissionLevel[]>>;
+      security?: Partial<StaffSecurityConfig>;
+      notificationPrefs?: Partial<StaffNotificationPrefs>;
+    },
+    deviceName?: string
+  ): StaffUser {
+    const actor = this.getActingUser(userId);
+    const isSelfOnlyUpdate =
+      actor.id === targetUserId &&
+      !patch.role &&
+      patch.active === undefined &&
+      !patch.allowedPropertyIds &&
+      !patch.customModulePermissions &&
+      patch.managerRating === undefined;
+    if (!isSelfOnlyUpdate) {
+      this.assertPermission(userId, 'manage_users');
+    }
+    const target = this.state.users.find((u) => u.id === targetUserId);
+    if (!target) throw new Error('الموظف غير موجود');
+
+    const oldRole = target.roleLabelAr;
+    if (patch.nameAr !== undefined) target.nameAr = patch.nameAr.trim();
+    if (patch.nameEn !== undefined) target.nameEn = patch.nameEn.trim();
+    if (patch.email !== undefined) target.email = patch.email.trim();
+    if (patch.phone !== undefined) target.phone = patch.phone.trim();
+    if (patch.role !== undefined) target.role = patch.role;
+    if (patch.roleLabelAr !== undefined) target.roleLabelAr = patch.roleLabelAr;
+    if (patch.roleLabelEn !== undefined) target.roleLabelEn = patch.roleLabelEn;
+    if (patch.specialty !== undefined) target.specialty = patch.specialty;
+    if (patch.approvalLimitSar !== undefined) target.approvalLimitSar = Number(patch.approvalLimitSar);
+    if (patch.active !== undefined) target.active = patch.active;
+    if (patch.statusState !== undefined) target.statusState = patch.statusState;
+    if (patch.managerRating !== undefined) target.managerRating = Math.min(5, Math.max(1, Number(patch.managerRating)));
+    if (patch.allowedPropertyIds !== undefined) {
+      target.allowedPropertyIds = patch.allowedPropertyIds.length > 0 ? patch.allowedPropertyIds : undefined;
+    }
+    if (patch.customModulePermissions !== undefined) {
+      target.customModulePermissions = patch.customModulePermissions;
+    }
+    if (patch.security) {
+      target.security = { ...(target.security || {}), ...patch.security };
+    }
+    if (patch.notificationPrefs) {
+      target.notificationPrefs = { ...(target.notificationPrefs || {}), ...patch.notificationPrefs };
+    }
+
+    this.addAudit(
+      actor,
+      'تحديث ملف وصلاحيات موظف',
+      'StaffUser',
+      target.id,
+      `تحديث بيانات/صلاحيات ${target.nameAr}${patch.roleLabelAr ? ` (${oldRole} ← ${patch.roleLabelAr})` : ''}`,
+      { oldValue: oldRole, newValue: target.roleLabelAr, deviceName }
+    );
+    this.persist();
+    return target;
+  }
+
+  public updateSecurityPolicy(userId: string, patch: Partial<SecurityPolicy>, deviceName?: string): SecurityPolicy {
+    const actor = this.assertPermission(userId, 'manage_users');
+    const current: SecurityPolicy = this.state.securityPolicy || {
+      minPasswordLength: 8,
+      requireSpecialChars: true,
+      passwordExpiryDays: 90,
+      autoLockMinutes: 5,
+      maxFailedAttempts: 5,
+      require2faForManagersAndAccountants: true,
+    };
+    this.state.securityPolicy = { ...current, ...patch };
+    this.addAudit(
+      actor,
+      'تحديث سياسة الأمان وكلمات المرور',
+      'SecurityPolicy',
+      'company-security',
+      `تحديث سياسات الأمان: الطول الأدنى ${this.state.securityPolicy.minPasswordLength}، القفل ${this.state.securityPolicy.autoLockMinutes} د`,
+      { deviceName }
+    );
+    this.persist();
+    return this.state.securityPolicy;
+  }
+
+  public recordLoginEvent(input: {
+    userId: string;
+    deviceName: string;
+    ipAddress?: string;
+    method?: LoginAuditEntry['method'];
+    success?: boolean;
+  }): void {
+    const user = this.state.users.find((u) => u.id === input.userId);
+    if (!user) return;
+    if (!this.state.loginHistory) this.state.loginHistory = [];
+    const entry: LoginAuditEntry = {
+      id: uid('lgn'),
+      userId: user.id,
+      userName: user.nameAr,
+      userRole: user.roleLabelAr,
+      deviceName: input.deviceName || user.deviceName,
+      ipAddress: input.ipAddress || '192.168.10.1',
+      geoLocation: 'الرياض · المملكة العربية السعودية',
+      method: input.method || 'كلمة المرور',
+      success: input.success !== false,
+      createdAt: new Date().toISOString(),
+    };
+    this.state.loginHistory.unshift(entry);
+    if (this.state.loginHistory.length > 100) {
+      this.state.loginHistory = this.state.loginHistory.slice(0, 100);
+    }
+    user.lastActiveAt = entry.createdAt;
+    this.persist();
+  }
+
+  public resolveSyncConflict(
+    userId: string,
+    conflictId: string,
+    resolution: 'تم اعتماد التعديل الأحدث' | 'تم الإبقاء على النسخة السابقة',
+    deviceName?: string
+  ): SyncConflictRecord {
+    const actor = this.assertPermission(userId, 'manage_users');
+    const cnf = (this.state.syncConflicts || []).find((c) => c.id === conflictId);
+    if (!cnf) throw new Error('سجل التعارض غير موجود');
+    cnf.status = resolution;
+    cnf.resolvedBy = actor.nameAr;
+    cnf.resolvedAt = new Date().toISOString();
+    this.addAudit(actor, 'معالجة تعارض مزامنة', 'SyncConflict', cnf.id, `${resolution} لـ ${cnf.entityLabel}`, {
+      newValue: resolution,
+      deviceName,
+    });
+    this.persist();
+    return cnf;
+  }
+
+  // 14. Communication Templates Library & System Maintenance
+  public createTemplate(
+    userId: string,
+    input: Omit<CommunicationTemplate, 'id' | 'usageCount' | 'createdBy' | 'updatedAt'>,
+    deviceName?: string
+  ): CommunicationTemplate {
+    const actor = this.getActingUser(userId);
+    if (!this.state.communicationTemplates) this.state.communicationTemplates = [];
+    const now = new Date().toISOString();
+    const tpl: CommunicationTemplate = {
+      ...input,
+      id: uid('tpl'),
+      usageCount: 0,
+      createdBy: actor.id,
+      updatedBy: actor.nameAr,
+      updatedAt: now,
+      editHistory: [{ editedBy: actor.nameAr, editedAt: now, summary: 'إنشاء القالب' }],
+    };
+    this.state.communicationTemplates.unshift(tpl);
+    this.addAudit(actor, 'إنشاء قالب تواصل', 'CommunicationTemplate', tpl.id, `إنشاء القالب "${tpl.name}" (${tpl.category})`, {
+      deviceName,
+    });
+    this.persist();
+    return tpl;
+  }
+
+  public updateTemplate(
+    userId: string,
+    templateId: string,
+    patch: Partial<CommunicationTemplate>,
+    deviceName?: string
+  ): CommunicationTemplate {
+    const actor = this.getActingUser(userId);
+    const list = this.state.communicationTemplates || [];
+    const tpl = list.find((t) => t.id === templateId);
+    if (!tpl) throw new Error('القالب غير موجود');
+    const now = new Date().toISOString();
+    Object.assign(tpl, patch, {
+      updatedBy: actor.nameAr,
+      updatedAt: now,
+    });
+    if (!tpl.editHistory) tpl.editHistory = [];
+    tpl.editHistory.unshift({
+      editedBy: actor.nameAr,
+      editedAt: now,
+      summary: patch.isFavorite !== undefined && Object.keys(patch).length === 1 ? 'تحديث المفضلة' : 'تحديث محتوى/إعدادات القالب',
+    });
+    if (tpl.editHistory.length > 20) tpl.editHistory = tpl.editHistory.slice(0, 20);
+    this.addAudit(actor, 'تحديث قالب تواصل', 'CommunicationTemplate', tpl.id, `تحديث القالب "${tpl.name}"`, {
+      deviceName,
+    });
+    this.persist();
+    return tpl;
+  }
+
+  public deleteTemplate(userId: string, templateId: string, deviceName?: string): void {
+    const actor = this.getActingUser(userId);
+    const existing = (this.state.communicationTemplates || []).find((t) => t.id === templateId);
+    this.state.communicationTemplates = (this.state.communicationTemplates || []).filter((t) => t.id !== templateId);
+    this.addAudit(actor, 'حذف قالب تواصل', 'CommunicationTemplate', templateId, `حذف القالب "${existing?.name || templateId}"`, {
+      deviceName,
+    });
+    this.persist();
+  }
+
+  public useTemplate(
+    userId: string,
+    templateId: string,
+    input: {
+      targetType: CommunicationLog['targetType'];
+      targetId: string;
+      targetName: string;
+      channel: CommunicationLog['channel'];
+      language: 'ar' | 'en' | 'bn';
+      summary: string;
+      localOnly?: boolean;
+    },
+    deviceName?: string
+  ): { template?: CommunicationTemplate; log?: CommunicationLog } {
+    const actor = this.getActingUser(userId);
+    const tpl = (this.state.communicationTemplates || []).find((t) => t.id === templateId);
+    if (tpl) {
+      tpl.usageCount = (tpl.usageCount || 0) + 1;
+    }
+    let log: CommunicationLog | undefined;
+    if (!input.localOnly) {
+      log = {
+        id: uid('com'),
+        targetType: input.targetType,
+        targetId: input.targetId,
+        targetName: input.targetName,
+        channel: input.channel,
+        templateId,
+        templateUsed: tpl?.name || 'قالب تواصل',
+        language: input.language,
+        summary: input.summary,
+        status: 'مرسل',
+        sentBy: actor.id,
+        createdAt: new Date().toISOString(),
+      };
+      this.state.communications.unshift(log);
+    }
+    this.addAudit(actor, 'استخدام قالب تواصل', 'CommunicationTemplate', templateId, `إرسال رسالة عبر "${tpl?.name || templateId}" إلى ${input.targetName}`, {
+      deviceName,
+    });
+    this.persist();
+    return { template: tpl, log };
+  }
+
+  public importTemplates(userId: string, templates: Partial<CommunicationTemplate>[], deviceName?: string): number {
+    const actor = this.getActingUser(userId);
+    if (!this.state.communicationTemplates) this.state.communicationTemplates = [];
+    const now = new Date().toISOString();
+    let count = 0;
+    for (const raw of templates) {
+      if (!raw.name || !raw.contentAr) continue;
+      this.state.communicationTemplates.unshift({
+        id: uid('tpl'),
+        name: String(raw.name),
+        category: raw.category || 'custom',
+        channel: raw.channel || 'whatsapp',
+        language: raw.language || 'ar',
+        contentAr: String(raw.contentAr),
+        contentEn: raw.contentEn ? String(raw.contentEn) : undefined,
+        isFavorite: Boolean(raw.isFavorite),
+        isSeasonal: Boolean(raw.isSeasonal),
+        usageCount: 0,
+        createdBy: actor.id,
+        updatedBy: actor.nameAr,
+        updatedAt: now,
+        editHistory: [{ editedBy: actor.nameAr, editedAt: now, summary: 'استيراد قالب' }],
+      });
+      count += 1;
+    }
+    this.addAudit(actor, 'استيراد قوالب تواصل', 'CommunicationTemplate', 'bulk-import', `استيراد ${count} قالب تواصل`, {
+      deviceName,
+    });
+    this.persist();
+    return count;
+  }
+
+  public previewBackup(backupId: string): {
+    id: string;
+    exists: boolean;
+    propertiesCount: number;
+    unitsCount: number;
+    tenantsCount: number;
+    contractsCount: number;
+    paymentsCount: number;
+    templatesCount: number;
+    lastUpdatedAt?: string;
+  } {
+    const filePath = path.join(BACKUP_DIR, `${backupId}.json`);
+    if (!fs.existsSync(filePath)) {
+      return {
+        id: backupId,
+        exists: false,
+        propertiesCount: 0,
+        unitsCount: 0,
+        tenantsCount: 0,
+        contractsCount: 0,
+        paymentsCount: 0,
+        templatesCount: 0,
+      };
+    }
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as AqarDatabaseState;
+    return {
+      id: backupId,
+      exists: true,
+      propertiesCount: parsed.properties?.length || 0,
+      unitsCount: parsed.units?.length || 0,
+      tenantsCount: parsed.tenants?.length || 0,
+      contractsCount: parsed.contracts?.length || 0,
+      paymentsCount: parsed.payments?.length || 0,
+      templatesCount: parsed.communicationTemplates?.length || 0,
+      lastUpdatedAt: parsed.lastUpdatedAt,
+    };
+  }
+
+  public clearTempCache(userId: string, deviceName?: string): CompanySettings {
+    const actor = this.assertPermission(userId, 'manage_users');
+    if (!this.state.settings.developerCenter) {
+      this.state.settings.developerCenter = { tempCacheSizeKb: 0, errorLogs: [] };
+    }
+    this.state.settings.developerCenter.tempCacheSizeKb = 0;
+    this.state.settings.developerCenter.errorLogs.unshift({
+      id: uid('err'),
+      timestamp: new Date().toISOString(),
+      source: 'StorageManager',
+      message: 'تم تنظيف الملفات المؤقتة وذاكرة التخزين المرحلي بنجاح',
+      severity: 'info',
+    });
+    this.addAudit(actor, 'تنظيف الملفات المؤقتة', 'SystemMaintenance', 'cache', 'تنظيف ذاكرة التخزين المؤقتة', { deviceName });
+    this.persist();
+    return this.state.settings;
   }
 }

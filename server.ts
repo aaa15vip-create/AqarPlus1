@@ -14,24 +14,48 @@ const store = new AqarStore();
 
 interface ClientSession {
   ws: WebSocket;
+  sessionId: string;
   userId: string;
   deviceName: string;
+  ipAddress: string;
   connectedAt: string;
 }
 
 const activeSessions = new Map<WebSocket, ClientSession>();
 
+function extractClientIp(req: http.IncomingMessage): string {
+  const fwd = req.headers['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd.trim()) {
+    return fwd.split(',')[0].trim();
+  }
+  const remote = req.socket?.remoteAddress || '127.0.0.1';
+  return remote.replace(/^::ffff:/, '');
+}
+
 function getPresenceList() {
   const state = store.getState();
-  const seen = new Map<string, { userId: string; nameAr: string; roleLabelAr: string; deviceName: string; connectedAt: string }>();
+  const seen = new Map<
+    string,
+    {
+      sessionId: string;
+      userId: string;
+      nameAr: string;
+      roleLabelAr: string;
+      deviceName: string;
+      ipAddress: string;
+      connectedAt: string;
+    }
+  >();
   for (const s of activeSessions.values()) {
     const user = state.users.find((u) => u.id === s.userId);
     if (user) {
-      seen.set(`${s.userId}:${s.deviceName}`, {
+      seen.set(s.sessionId, {
+        sessionId: s.sessionId,
         userId: user.id,
         nameAr: user.nameAr,
         roleLabelAr: user.roleLabelAr,
         deviceName: s.deviceName || user.deviceName,
+        ipAddress: s.ipAddress,
         connectedAt: s.connectedAt,
       });
     }
@@ -63,11 +87,11 @@ function broadcastStateChange(actorUserId: string, eventSummary: string) {
   }
 }
 
-function getActor(req: Request): { userId: string; deviceName?: string } {
+function getActor(req: Request): { userId: string; deviceName?: string; ipAddress: string } {
   const userId = String(req.headers['x-user-id'] || req.query.userId || 'usr-gm');
   const rawDevice = req.headers['x-device-name'];
   const deviceName = rawDevice ? decodeURIComponent(String(rawDevice)) : undefined;
-  return { userId, deviceName };
+  return { userId, deviceName, ipAddress: extractClientIp(req) };
 }
 
 function handleApi(app: express.Express) {
@@ -298,6 +322,40 @@ function handleApi(app: express.Express) {
       const { userId, deviceName } = getActor(req);
       const task = store.updateTask(userId, String(req.params.id), req.body, deviceName);
       broadcastStateChange(userId, `تحديث مهمة: ${task.title}`);
+      res.json({ task, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/tasks/:id/reassign', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const task = store.reassignTask(
+        userId,
+        String(req.params.id),
+        String(req.body.assignedTo || ''),
+        req.body.reason ? String(req.body.reason) : undefined,
+        deviceName
+      );
+      broadcastStateChange(userId, `تحويل مهمة: ${task.title}`);
+      res.json({ task, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/tasks/:id/review', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const task = store.reviewTask(
+        userId,
+        String(req.params.id),
+        req.body.decision === 'reject' ? 'reject' : 'approve',
+        req.body.reason ? String(req.body.reason) : undefined,
+        deviceName
+      );
+      broadcastStateChange(userId, `مراجعة واعتماد مهمة: ${task.title}`);
       res.json({ task, state: store.getStateForUser(userId) });
     } catch (e: unknown) {
       res.status(400).json({ error: (e as Error).message });
@@ -636,6 +694,302 @@ function handleApi(app: express.Express) {
       res.status(400).json({ error: (e as Error).message });
     }
   });
+
+  app.post('/api/workspace/reset-fresh', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const fresh = store.resetToFreshWorkspace(userId, deviceName);
+      broadcastStateChange(userId, 'تهيئة مساحة عمل نظيفة عبر الإعداد الأولي');
+      res.json({ ok: true, state: fresh });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Smart Archive Center Endpoints
+  app.post('/api/archive/move', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const result = store.archiveEntity(userId, req.body, deviceName);
+      broadcastStateChange(userId, result.summary);
+      res.json({ ...result, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/archive/restore', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const result = store.restoreArchivedEntity(userId, req.body, deviceName);
+      broadcastStateChange(userId, result.restoredSummary);
+      res.json({ ...result, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      const msg = (e as Error).message || '';
+      const isConflict = msg.startsWith('CONFLICT_ACTIVE_CONTRACT:');
+      res.status(isConflict ? 409 : 400).json({ error: msg, conflict: isConflict });
+    }
+  });
+
+  app.post('/api/archive/run-scheduled', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const result = store.runScheduledArchival(userId, deviceName);
+      broadcastStateChange(userId, result.summary);
+      res.json({ ...result, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/archive/filters', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const filter = store.saveArchiveFilter(userId, req.body, deviceName);
+      broadcastStateChange(userId, `حفظ فلتر الأرشيف "${filter.name}"`);
+      res.status(201).json({ filter, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.delete('/api/archive/filters/:id', (req: Request, res: Response) => {
+    try {
+      const { userId } = getActor(req);
+      store.deleteArchiveFilter(userId, String(req.params.id));
+      res.json({ ok: true, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Team & Workforce Management Endpoints
+  app.post('/api/team/users', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const user = store.createStaffUser(userId, req.body, deviceName);
+      broadcastStateChange(userId, `إضافة موظف جديد: ${user.nameAr}`);
+      res.status(201).json({ user, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.patch('/api/team/users/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const user = store.updateStaffUser(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `تحديث ملف الموظف: ${user.nameAr}`);
+      res.json({ user, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.patch('/api/team/security-policy', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const securityPolicy = store.updateSecurityPolicy(userId, req.body, deviceName);
+      broadcastStateChange(userId, `تحديث سياسة الأمان وكلمات المرور`);
+      res.json({ securityPolicy, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/team/conflicts/:id/resolve', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const resolution =
+        req.body.resolution === 'تم الإبقاء على النسخة السابقة'
+          ? 'تم الإبقاء على النسخة السابقة'
+          : 'تم اعتماد التعديل الأحدث';
+      const conflict = store.resolveSyncConflict(userId, String(req.params.id), resolution, deviceName);
+      broadcastStateChange(userId, `معالجة تعارض مزامنة: ${conflict.entityLabel}`);
+      res.json({ conflict, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/team/sessions/terminate', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName, ipAddress } = getActor(req);
+      const state = store.getState();
+      const actor = state.users.find((u) => u.id === userId);
+      if (!actor || !(state.rolePermissions[actor.role] || []).includes('manage_users')) {
+        throw new Error('لا تملك صلاحية إنهاء الجلسات عن بُعد');
+      }
+      const targetUserId = req.body.userId ? String(req.body.userId) : undefined;
+      const targetSessionId = req.body.sessionId ? String(req.body.sessionId) : undefined;
+      const reason = String(req.body.reason || 'إنهاء جلسة إداري عن بُعد');
+
+      let terminatedCount = 0;
+      for (const [client, session] of Array.from(activeSessions.entries())) {
+        const matchesSession = targetSessionId && session.sessionId === targetSessionId;
+        const matchesUser = !targetSessionId && targetUserId && session.userId === targetUserId;
+        if (matchesSession || matchesUser) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(
+              JSON.stringify({
+                type: 'session:terminated',
+                userId: session.userId,
+                sessionId: session.sessionId,
+                reason,
+                terminatedBy: actor.nameAr,
+              })
+            );
+          }
+          activeSessions.delete(client);
+          try {
+            client.close(4001, 'Terminated by administrator');
+          } catch {
+            // ignore
+          }
+          terminatedCount += 1;
+        }
+      }
+
+      if (targetUserId) {
+        store.recordLoginEvent({
+          userId: targetUserId,
+          deviceName: deviceName || 'لوحة إدارة الفريق',
+          ipAddress,
+          method: 'تسجيل خروج عن بُعد',
+          success: true,
+        });
+      }
+
+      broadcastPresence();
+      broadcastStateChange(userId, `إنهاء ${terminatedCount} جلسة نشطة عن بُعد`);
+      res.json({
+        ok: true,
+        terminatedCount,
+        presence: getPresenceList(),
+        state: store.getStateForUser(userId),
+      });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/security/logout-others', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName, ipAddress } = getActor(req);
+      const keepSessionId = req.body?.keepSessionId ? String(req.body.keepSessionId) : undefined;
+      let terminatedCount = 0;
+      for (const [client, session] of Array.from(activeSessions.entries())) {
+        if (session.userId === userId && (!keepSessionId || session.sessionId !== keepSessionId)) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(
+              JSON.stringify({
+                type: 'session:terminated',
+                userId: session.userId,
+                sessionId: session.sessionId,
+                reason: 'تم تسجيل الخروج من جميع الأجهزة الأخرى عبر مركز الأمان',
+              })
+            );
+          }
+          activeSessions.delete(client);
+          try {
+            client.close(4001, 'Logged out from security center');
+          } catch {
+            // ignore
+          }
+          terminatedCount += 1;
+        }
+      }
+      store.recordLoginEvent({
+        userId,
+        deviceName: deviceName || 'مركز الأمان',
+        ipAddress,
+        method: 'تسجيل خروج عن بُعد',
+        success: true,
+      });
+      broadcastPresence();
+      broadcastStateChange(userId, `تسجيل الخروج من جميع الأجهزة الأخرى (${terminatedCount} جلسة)`);
+      res.json({ ok: true, terminatedCount, presence: getPresenceList(), state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/backups/:id/preview', (req: Request, res: Response) => {
+    try {
+      const preview = store.previewBackup(String(req.params.id));
+      res.json(preview);
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/system/clear-temp', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const settings = store.clearTempCache(userId, deviceName);
+      broadcastStateChange(userId, 'تنظيف الملفات المؤقتة من مركز الإعدادات');
+      res.json({ settings, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Communication Templates Endpoints
+  app.post('/api/templates', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const template = store.createTemplate(userId, req.body, deviceName);
+      broadcastStateChange(userId, `إنشاء قالب تواصل: ${template.name}`);
+      res.status(201).json({ template, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.patch('/api/templates/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const template = store.updateTemplate(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `تحديث قالب التواصل: ${template.name}`);
+      res.json({ template, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.delete('/api/templates/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      store.deleteTemplate(userId, String(req.params.id), deviceName);
+      broadcastStateChange(userId, 'حذف قالب تواصل');
+      res.json({ ok: true, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/templates/:id/use', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const result = store.useTemplate(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `إرسال رسالة لقالب ${result.template?.name || ''}`);
+      res.json({ ...result, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/templates/import', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const templates = Array.isArray(req.body?.templates) ? req.body.templates : [];
+      const count = store.importTemplates(userId, templates, deviceName);
+      broadcastStateChange(userId, `استيراد ${count} قالب تواصل`);
+      res.status(201).json({ count, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
 }
 
 async function startServer() {
@@ -645,11 +999,15 @@ async function startServer() {
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req) => {
+    const sessionId = `ses-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const ipAddress = extractClientIp(req);
     activeSessions.set(ws, {
       ws,
+      sessionId,
       userId: 'usr-gm',
       deviceName: 'Web Browser',
+      ipAddress,
       connectedAt: new Date().toISOString(),
     });
 
@@ -657,16 +1015,31 @@ async function startServer() {
       try {
         const msg = JSON.parse(String(raw));
         if (msg.type === 'session:identify') {
+          const prev = activeSessions.get(ws);
+          const nextUserId = String(msg.userId || 'usr-gm');
+          const nextDevice = String(msg.deviceName || 'Web Browser');
+          const shouldLogLogin = !prev || prev.userId !== nextUserId;
           activeSessions.set(ws, {
             ws,
-            userId: String(msg.userId || 'usr-gm'),
-            deviceName: String(msg.deviceName || 'Web Browser'),
-            connectedAt: new Date().toISOString(),
+            sessionId: prev?.sessionId || sessionId,
+            userId: nextUserId,
+            deviceName: nextDevice,
+            ipAddress,
+            connectedAt: prev?.connectedAt || new Date().toISOString(),
           });
+          if (shouldLogLogin) {
+            store.recordLoginEvent({
+              userId: nextUserId,
+              deviceName: nextDevice,
+              ipAddress,
+              method: 'كلمة المرور',
+              success: true,
+            });
+          }
           ws.send(
             JSON.stringify({
               type: 'state:init',
-              state: store.getStateForUser(msg.userId),
+              state: store.getStateForUser(nextUserId),
               presence: getPresenceList(),
             })
           );

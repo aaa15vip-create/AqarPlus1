@@ -18,13 +18,24 @@ import {
   ChevronDown,
   ChevronUp,
   Workflow,
+  CheckCircle2,
+  AlertTriangle,
+  Wrench,
+  Clock,
 } from 'lucide-react';
 import { useAqar } from '../context/AqarContext';
 import { OcrExtractedData, Property, PropertyOwnershipMode, PropertyType, Unit, UnitStatus, UnitType } from '../types/aqar';
 import { formatSar } from '../utils/formatters';
+import { triggerHaptic } from '../utils/haptics';
 import { QrCodeSvg } from './QrCodeSvg';
 import { PrintViewButton } from './PrintViewButton';
+import { SwipeableRow } from './SwipeableRow';
+import { MoveToArchiveButton } from './MoveToArchiveButton';
+import { CreateTaskQuickButton } from './CreateTaskQuickModal';
 import { readFileAsDataUrl, runGeminiOcrExtraction } from '../utils/ocrClient';
+import unitApartmentImg from '../assets/images/unit_modern_apartment_1794682469428.jpg';
+import unitVillaImg from '../assets/images/unit_luxury_villa_1794682469756.jpg';
+import unitOfficeImg from '../assets/images/unit_commercial_office_1794682470533.jpg';
 
 const UNIT_STATUSES: UnitStatus[] = [
   'شاغرة',
@@ -39,48 +50,59 @@ const UNIT_STATUSES: UnitStatus[] = [
   'مؤرشفة',
 ];
 
-function unitStatusTone(status: UnitStatus): string {
-  switch (status) {
-    case 'مؤجرة':
-      return 'text-emerald-600 dark:text-emerald-400';
-    case 'شاغرة':
-      return 'text-blue-600 dark:text-blue-400';
-    case 'متأخرة في السداد':
-    case 'موقوفة':
-      return 'text-red-600 dark:text-red-400';
-    case 'تحت الصيانة':
-    case 'تحتاج إلى تنظيف':
-    case 'محجوزة':
-    case 'قيد التأجير':
-    case 'بانتظار الاستلام':
-      return 'text-amber-600 dark:text-amber-400';
+function getDefaultUnitImage(unitType: UnitType): string {
+  switch (unitType) {
+    case 'فيلا':
+      return unitVillaImg;
+    case 'مكتب':
+    case 'معرض تجاري':
+      return unitOfficeImg;
     default:
-      return 'text-slate-500';
+      return unitApartmentImg;
   }
 }
 
-function unitCardAccent(status: UnitStatus): string {
+function unitStatusTone(status: UnitStatus): string {
   switch (status) {
     case 'مؤجرة':
-      return 'border-s-4 border-s-emerald-500';
+      return 'text-emerald-700 dark:text-emerald-300 bg-emerald-500/12 border-emerald-500/25';
     case 'شاغرة':
-      return 'border-s-4 border-s-blue-500';
+      return 'text-blue-700 dark:text-blue-300 bg-blue-500/12 border-blue-500/25';
     case 'متأخرة في السداد':
     case 'موقوفة':
-      return 'border-s-4 border-s-red-500';
+      return 'text-red-700 dark:text-red-300 bg-red-500/12 border-red-500/25';
     case 'تحت الصيانة':
     case 'تحتاج إلى تنظيف':
     case 'محجوزة':
     case 'قيد التأجير':
     case 'بانتظار الاستلام':
-      return 'border-s-4 border-s-amber-500';
+      return 'text-amber-700 dark:text-amber-300 bg-amber-500/12 border-amber-500/25';
     default:
-      return '';
+      return 'text-slate-600 dark:text-slate-300 bg-slate-500/10 border-slate-500/20';
+  }
+}
+
+function UnitStatusIcon({ status }: { status: UnitStatus }) {
+  switch (status) {
+    case 'مؤجرة':
+      return <CheckCircle2 className="w-3 h-3 shrink-0" />;
+    case 'شاغرة':
+      return <KeyRound className="w-3 h-3 shrink-0" />;
+    case 'متأخرة في السداد':
+    case 'موقوفة':
+      return <AlertTriangle className="w-3 h-3 shrink-0" />;
+    case 'تحت الصيانة':
+    case 'تحتاج إلى تنظيف':
+      return <Wrench className="w-3 h-3 shrink-0" />;
+    default:
+      return <Clock className="w-3 h-3 shrink-0" />;
   }
 }
 
 export function PropertiesUnitsView() {
-  const { state, currentUser, lang, hasPermission, mutate, pushToast, startLeasingWizardForUnit } = useAqar();
+  const { state, currentUser, lang, hasPermission, mutate, pushToast, startLeasingWizardForUnit, setActiveNav } = useAqar();
+  const [submittingProp, setSubmittingProp] = useState(false);
+  const [submittingUnit, setSubmittingUnit] = useState(false);
   const [selectedPropertyId, setSelectedPropertyId] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
@@ -215,79 +237,94 @@ export function PropertiesUnitsView() {
 
   const handleCreateProperty = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!propForm.nameAr.trim() || !propForm.code.trim()) return;
-    const res = await mutate<{ property?: Property }>(
-      'POST',
-      '/api/properties',
-      {
-        ...propForm,
-        status: 'نشط',
-        ownerShares: [{ ownerId: propForm.ownerId, sharePercent: 100 }],
-      },
-      { offlineDescAr: `إضافة عقار ${propForm.nameAr}` }
-    );
-    if (res) {
-      if (scannedPropDoc && res.property) {
-        await mutate('POST', '/api/documents', {
-          title: [scannedPropDoc.extracted.docType, res.property.nameAr].filter(Boolean).join(' - '),
-          category: scannedPropDoc.extracted.docType === 'عقد إيجار' ? 'عقود إيجار' : 'صكوك',
-          fileName: scannedPropDoc.fileName,
-          fileType: scannedPropDoc.mimeType.includes('pdf') ? 'PDF' : 'JPG',
-          fileSizeKb: scannedPropDoc.sizeKb,
-          relatedType: 'عقار',
-          relatedId: res.property.id,
-          version: 1,
-          dataUrl: scannedPropDoc.dataUrl,
-          ocrStatus: 'تم الاستخراج آلياً',
-          ocrRawText: scannedPropDoc.extracted.rawText,
-          ocrExtracted: scannedPropDoc.extracted,
-          accessLog: [],
-        });
+    if (submittingProp || !propForm.nameAr.trim() || !propForm.code.trim()) return;
+    setSubmittingProp(true);
+    triggerHaptic('medium');
+    try {
+      const res = await mutate<{ property?: Property }>(
+        'POST',
+        '/api/properties',
+        {
+          ...propForm,
+          status: 'نشط',
+          ownerShares: [{ ownerId: propForm.ownerId, sharePercent: 100 }],
+        },
+        { offlineDescAr: `إضافة عقار ${propForm.nameAr}` }
+      );
+      if (res) {
+        if (scannedPropDoc && res.property) {
+          await mutate('POST', '/api/documents', {
+            title: [scannedPropDoc.extracted.docType, res.property.nameAr].filter(Boolean).join(' - '),
+            category: scannedPropDoc.extracted.docType === 'عقد إيجار' ? 'عقود إيجار' : 'صكوك',
+            fileName: scannedPropDoc.fileName,
+            fileType: scannedPropDoc.mimeType.includes('pdf') ? 'PDF' : 'JPG',
+            fileSizeKb: scannedPropDoc.sizeKb,
+            relatedType: 'عقار',
+            relatedId: res.property.id,
+            version: 1,
+            dataUrl: scannedPropDoc.dataUrl,
+            ocrStatus: 'تم الاستخراج آلياً',
+            ocrRawText: scannedPropDoc.extracted.rawText,
+            ocrExtracted: scannedPropDoc.extracted,
+            accessLog: [],
+          });
+        }
+        triggerHaptic('success');
+        pushToast('success', lang === 'ar' ? 'تمت إضافة العقار بنجاح' : 'Property created');
+        if (res.property) {
+          setSelectedPropertyId(res.property.id);
+          setNextStepPrompt({
+            type: 'add-unit',
+            propertyId: res.property.id,
+            propertyName: lang === 'ar' ? res.property.nameAr : res.property.nameEn,
+          });
+        }
+        setScannedPropDoc(null);
+        setShowAddProp(false);
+        setShowAdvancedProp(false);
       }
-      pushToast('success', lang === 'ar' ? 'تمت إضافة العقار بنجاح' : 'Property created');
-      if (res.property) {
-        setSelectedPropertyId(res.property.id);
-        setNextStepPrompt({
-          type: 'add-unit',
-          propertyId: res.property.id,
-          propertyName: lang === 'ar' ? res.property.nameAr : res.property.nameEn,
-        });
-      }
-      setScannedPropDoc(null);
-      setShowAddProp(false);
-      setShowAdvancedProp(false);
+    } finally {
+      setSubmittingProp(false);
     }
   };
 
   const handleCreateUnit = async (e: React.FormEvent) => {
     e.preventDefault();
     const propertyId = unitForm.propertyId || state.properties[0]?.id;
-    if (!propertyId || !unitForm.unitNumber.trim()) return;
-    const res = await mutate<{ unit?: Unit }>(
-      'POST',
-      '/api/units',
-      {
-        ...unitForm,
-        propertyId,
-        status: 'شاغرة',
-        vacantSince: new Date().toISOString().slice(0, 10),
-      },
-      { offlineDescAr: `إضافة وحدة ${unitForm.unitNumber}` }
-    );
-    if (res) {
-      pushToast('success', lang === 'ar' ? 'تمت إضافة الوحدة بنجاح' : 'Unit added');
-      if (res.unit) {
-        setNextStepPrompt({
-          type: 'lease-unit',
-          unit: res.unit,
-          unitNumber: res.unit.unitNumber,
-        });
+    if (submittingUnit || !propertyId || !unitForm.unitNumber.trim()) return;
+    setSubmittingUnit(true);
+    triggerHaptic('medium');
+    try {
+      const res = await mutate<{ unit?: Unit }>(
+        'POST',
+        '/api/units',
+        {
+          ...unitForm,
+          propertyId,
+          status: 'شاغرة',
+          vacantSince: new Date().toISOString().slice(0, 10),
+        },
+        { offlineDescAr: `إضافة وحدة ${unitForm.unitNumber}` }
+      );
+      if (res) {
+        triggerHaptic('success');
+        pushToast('success', lang === 'ar' ? 'تمت إضافة الوحدة بنجاح' : 'Unit added');
+        if (res.unit) {
+          setNextStepPrompt({
+            type: 'lease-unit',
+            unit: res.unit,
+            unitNumber: res.unit.unitNumber,
+          });
+        }
+        setShowAddUnit(false);
       }
-      setShowAddUnit(false);
+    } finally {
+      setSubmittingUnit(false);
     }
   };
 
   const handleStatusChange = async (unitId: string, nextStatus: UnitStatus) => {
+    triggerHaptic('light');
     const res = await mutate(
       'PATCH',
       `/api/units/${unitId}/status`,
@@ -295,6 +332,7 @@ export function PropertiesUnitsView() {
       { offlineDescAr: `تغيير حالة وحدة إلى ${nextStatus}` }
     );
     if (res) {
+      triggerHaptic('success');
       pushToast('success', lang === 'ar' ? 'تم تحديث حالة الوحدة' : 'Unit status updated');
     }
   };
@@ -485,22 +523,33 @@ export function PropertiesUnitsView() {
 
       {/* Units Filter Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl border border-slate-200 dark:border-white/10 glass-surface">
-        <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[260px]">
-          <div className="relative flex-1 max-w-xs">
+        <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[240px]">
+          <div className="relative flex-1 max-w-xs min-w-[180px]">
             <Search className="w-4 h-4 text-slate-400 absolute top-1/2 -translate-y-1/2 start-3 pointer-events-none" />
             <input
-              type="text"
+              type="search"
+              enterKeyHint="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder={lang === 'ar' ? 'بحث برقم الوحدة أو المستأجر...' : 'Search unit or tenant...'}
-              className="w-full ps-9 pe-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A] focus:outline-none focus:ring-2 focus:ring-[#26478D]"
+              placeholder={lang === 'ar' ? 'بحث فوري برقم الوحدة أو المستأجر...' : 'Instant search unit or tenant...'}
+              className="w-full min-h-[42px] ps-9 pe-8 py-1.5 text-xs rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A] focus:outline-none focus:ring-2 focus:ring-[#26478D]"
             />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                className="absolute top-1/2 -translate-y-1/2 end-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                aria-label="Clear"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
 
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
+            className="min-h-[42px] px-3 py-1.5 text-xs rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
           >
             <option value="all">{lang === 'ar' ? 'جميع الحالات (10)' : 'All Statuses (10)'}</option>
             {UNIT_STATUSES.map((st) => (
@@ -520,17 +569,21 @@ export function PropertiesUnitsView() {
           )}
         </div>
 
-        <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 dark:bg-white/[0.06]">
+        <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-white/[0.06]">
           <button
             onClick={() => setViewMode('grid')}
-            className={`p-1.5 rounded-md cursor-pointer ${viewMode === 'grid' ? 'bg-white dark:bg-[#26478D] shadow-sm' : 'text-slate-500'}`}
+            className={`min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg cursor-pointer ${
+              viewMode === 'grid' ? 'bg-white dark:bg-[#26478D] text-slate-900 dark:text-white shadow-sm' : 'text-slate-500'
+            }`}
             aria-label="Grid view"
           >
             <LayoutGrid className="w-4 h-4" />
           </button>
           <button
             onClick={() => setViewMode('table')}
-            className={`p-1.5 rounded-md cursor-pointer ${viewMode === 'table' ? 'bg-white dark:bg-[#26478D] shadow-sm' : 'text-slate-500'}`}
+            className={`min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg cursor-pointer ${
+              viewMode === 'table' ? 'bg-white dark:bg-[#26478D] text-slate-900 dark:text-white shadow-sm' : 'text-slate-500'
+            }`}
             aria-label="Table view"
           >
             <List className="w-4 h-4" />
@@ -538,59 +591,124 @@ export function PropertiesUnitsView() {
         </div>
       </div>
 
-      {/* Units Display: Grid or Table */}
+      {/* Units Display: Sleek Visual Grid or Table */}
       {viewMode === 'grid' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {filteredUnits.map((unit) => {
-            const prop = state.properties.find((p) => p.id === unit.propertyId);
-            const activeContract = state.contracts.find(
-              (c) => c.unitId === unit.id && (c.lifecycleStatus === 'نشط' || c.lifecycleStatus === 'بانتظار التجديد')
-            );
-            const tenant = state.tenants.find((t) => t.id === (activeContract?.tenantId || unit.linkedTenantId));
-            return (
-              <div
-                key={unit.id}
-                onClick={() => {
-                  setSelectedUnit(unit);
-                  setShowUnitTechDetails(false);
-                }}
-                className={`p-5 rounded-2xl border border-slate-200 dark:border-white/10 ${unitCardAccent(unit.status)} glass-surface hover:border-[#26478D]/50 transition-colors cursor-pointer space-y-3`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                      {prop?.nameAr} · {unit.buildingName} · {lang === 'ar' ? `طابق ${unit.floor}` : `Fl ${unit.floor}`}
-                    </div>
-                    <div className="text-base font-bold mt-0.5">
-                      {unit.unitType} <span className="font-mono-num">{unit.unitNumber}</span>
-                    </div>
-                  </div>
-                  <span className={`text-xs font-semibold whitespace-nowrap ${unitStatusTone(unit.status)}`}>
-                    {unit.status}
-                  </span>
-                </div>
+          {filteredUnits.length === 0 ? (
+            <div className="md:col-span-2 xl:col-span-3 p-10 rounded-2xl border border-slate-200 dark:border-white/10 glass-surface text-center text-xs text-slate-500">
+              {lang === 'ar' ? 'لا توجد وحدات مطابقة لنتائج البحث' : 'No matching units found'}
+            </div>
+          ) : (
+            filteredUnits.map((unit) => {
+              const prop = state.properties.find((p) => p.id === unit.propertyId);
+              const activeContract = state.contracts.find(
+                (c) => c.unitId === unit.id && (c.lifecycleStatus === 'نشط' || c.lifecycleStatus === 'بانتظار التجديد')
+              );
+              const tenant = state.tenants.find((t) => t.id === (activeContract?.tenantId || unit.linkedTenantId));
+              const docPhoto = state.documents.find(
+                (d) => d.dataUrl?.startsWith('data:image/') && (d.relatedId === unit.id || d.relatedId === unit.propertyId) && d.category === 'صور العقارات'
+              );
+              const thumbSrc = docPhoto?.dataUrl || getDefaultUnitImage(unit.unitType);
 
-                <div className="text-xs text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-2 font-mono-num">
-                  <span>{unit.areaSqm} م²</span>
-                  <span>·</span>
-                  <span>{unit.rooms} غرف</span>
-                  <span>·</span>
-                  <span>{unit.acCount} مكيفات</span>
-                  <span>·</span>
-                  <span>{unit.furnished ? 'مؤثثة' : 'غير مؤثثة'}</span>
-                </div>
+              return (
+                <SwipeableRow
+                  key={unit.id}
+                  rightSwipeAction={{
+                    label:
+                      unit.status === 'مؤجرة' || unit.status === 'متأخرة في السداد'
+                        ? lang === 'ar'
+                          ? 'تحصيل دفعة'
+                          : 'Collect'
+                        : lang === 'ar'
+                        ? 'تأجير الآن'
+                        : 'Lease',
+                    tone: 'emerald',
+                    onTrigger: () => {
+                      if (unit.status !== 'مؤجرة' && unit.status !== 'متأخرة في السداد') {
+                        startLeasingWizardForUnit(unit.id);
+                      } else {
+                        setActiveNav('finance');
+                      }
+                    },
+                  }}
+                  leftSwipeAction={{
+                    label: lang === 'ar' ? 'التفاصيل' : 'Details',
+                    tone: 'blue',
+                    onTrigger: () => {
+                      setSelectedUnit(unit);
+                      setShowUnitTechDetails(false);
+                    },
+                  }}
+                >
+                  <div
+                    onClick={() => {
+                      triggerHaptic('light');
+                      setSelectedUnit(unit);
+                      setShowUnitTechDetails(false);
+                    }}
+                    className="rounded-2xl border border-slate-200/85 dark:border-white/10 glass-surface glass-card-interactive hover:border-[#26478D]/50 cursor-pointer overflow-hidden flex flex-col"
+                  >
+                    {/* Crisp 16:9 Architectural Thumbnail */}
+                    <div className="relative h-36 w-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                      <img
+                        src={thumbSrc}
+                        alt={`${unit.unitType} ${unit.unitNumber}`}
+                        referrerPolicy="no-referrer"
+                        loading="lazy"
+                        className="w-full h-full object-cover"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-slate-950/75 via-slate-950/15 to-transparent" />
+                      <div className="absolute top-3 end-3">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-semibold backdrop-blur-md bg-white/90 dark:bg-[#0A0E1A]/85 ${unitStatusTone(
+                            unit.status
+                          )}`}
+                        >
+                          <UnitStatusIcon status={unit.status} />
+                          <span>{unit.status}</span>
+                        </span>
+                      </div>
+                      <div className="absolute bottom-2.5 inset-x-3 flex items-end justify-between gap-2 text-white">
+                        <div className="min-w-0">
+                          <div className="text-[11px] text-white/80 truncate">
+                            {prop?.nameAr} · {unit.buildingName}
+                          </div>
+                          <div className="text-base font-bold leading-tight truncate">
+                            {unit.unitType} <span className="font-mono-num">{unit.unitNumber}</span>
+                          </div>
+                        </div>
+                        <span className="text-[11px] font-mono-num text-white/85 shrink-0">
+                          {lang === 'ar' ? `طابق ${unit.floor}` : `Fl ${unit.floor}`}
+                        </span>
+                      </div>
+                    </div>
 
-                <div className="pt-3 border-t border-slate-200/70 dark:border-white/10 flex items-center justify-between text-xs">
-                  <div className="truncate max-w-[170px] text-slate-600 dark:text-slate-300">
-                    {tenant ? tenant.nameAr : unit.vacantSince ? `شاغرة منذ ${unit.vacantSince}` : 'متاحة للتأجير'}
+                    {/* Details Body */}
+                    <div className="p-4 space-y-3 flex-1 flex flex-col justify-between">
+                      <div className="text-xs text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-2 font-mono-num">
+                        <span>{unit.areaSqm} م²</span>
+                        <span>·</span>
+                        <span>{unit.rooms} غرف</span>
+                        <span>·</span>
+                        <span>{unit.acCount} مكيفات</span>
+                        <span>·</span>
+                        <span>{unit.furnished ? 'مؤثثة' : 'غير مؤثثة'}</span>
+                      </div>
+
+                      <div className="pt-3 border-t border-slate-200/70 dark:border-white/10 flex items-center justify-between gap-2 text-xs">
+                        <div className="truncate text-slate-600 dark:text-slate-300 min-w-0">
+                          {tenant ? tenant.nameAr : unit.vacantSince ? `شاغرة منذ ${unit.vacantSince}` : 'متاحة للتأجير'}
+                        </div>
+                        <div className="font-mono-num font-bold text-[#26478D] dark:text-blue-400 shrink-0">
+                          {formatSar(activeContract?.annualRent || unit.suggestedAnnualRent, lang)}/سنة
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  <div className="font-mono-num font-bold text-[#26478D] dark:text-blue-400 shrink-0">
-                    {formatSar(activeContract?.annualRent || unit.suggestedAnnualRent, lang)}/سنة
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+                </SwipeableRow>
+              );
+            })
+          )}
         </div>
       ) : (
         <div className="rounded-2xl border border-slate-200 dark:border-white/10 glass-surface overflow-x-auto">
@@ -636,33 +754,55 @@ export function PropertiesUnitsView() {
         </div>
       )}
 
-      {/* Unit Full Dossier Drawer */}
+      {/* Unit Full Dossier Drawer with Hero Scale Transition */}
       {activeSelectedUnit && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/60 backdrop-blur-sm">
-          <div className="w-full max-w-xl bg-white dark:bg-[#13192B] h-full overflow-y-auto p-6 space-y-6 border-s border-slate-200 dark:border-white/10 shadow-2xl">
-            <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-200 dark:border-white/10">
-              <div>
-                <div className="text-xs text-slate-500 dark:text-slate-400">
-                  {state.properties.find((p) => p.id === activeSelectedUnit.propertyId)?.nameAr} ·{' '}
-                  {activeSelectedUnit.buildingName}
+        <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/65 backdrop-blur-sm">
+          <div className="w-full max-w-xl bg-white dark:bg-[#13192B] h-full overflow-y-auto border-s border-slate-200 dark:border-white/10 shadow-2xl animate-aqar-hero">
+            {/* Hero Image Header */}
+            <div className="relative h-44 w-full bg-slate-900 overflow-hidden">
+              <img
+                src={
+                  state.documents.find(
+                    (d) =>
+                      d.dataUrl?.startsWith('data:image/') &&
+                      (d.relatedId === activeSelectedUnit.id || d.relatedId === activeSelectedUnit.propertyId) &&
+                      d.category === 'صور العقارات'
+                  )?.dataUrl || getDefaultUnitImage(activeSelectedUnit.unitType)
+                }
+                alt={`${activeSelectedUnit.unitType} ${activeSelectedUnit.unitNumber}`}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover opacity-90"
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-950/25 to-slate-950/20" />
+              <button
+                onClick={() => setSelectedUnit(null)}
+                className="absolute top-4 end-4 min-w-[44px] min-h-[44px] rounded-xl bg-black/45 text-white hover:bg-black/65 flex items-center justify-center backdrop-blur-md cursor-pointer"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              <div className="absolute bottom-4 inset-x-5 flex items-end justify-between gap-4 text-white">
+                <div className="min-w-0">
+                  <div className="text-xs text-white/80 truncate">
+                    {state.properties.find((p) => p.id === activeSelectedUnit.propertyId)?.nameAr} ·{' '}
+                    {activeSelectedUnit.buildingName}
+                  </div>
+                  <h3 className="text-2xl font-bold mt-0.5 truncate">
+                    {activeSelectedUnit.unitType}{' '}
+                    <span className="font-mono-num">{activeSelectedUnit.unitNumber}</span>
+                  </h3>
+                  <div className="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/15 backdrop-blur-md text-xs font-semibold">
+                    <UnitStatusIcon status={activeSelectedUnit.status} />
+                    <span>{activeSelectedUnit.status}</span>
+                  </div>
                 </div>
-                <h3 className="text-xl font-bold mt-0.5">
-                  {activeSelectedUnit.unitType} <span className="font-mono-num">{activeSelectedUnit.unitNumber}</span>
-                </h3>
-                <div className={`text-xs font-semibold mt-1 ${unitStatusTone(activeSelectedUnit.status)}`}>
-                  {activeSelectedUnit.status}
+                <div className="bg-white p-1.5 rounded-xl shrink-0">
+                  <QrCodeSvg value={`UNIT|${activeSelectedUnit.id}|${activeSelectedUnit.unitNumber}`} size={58} />
                 </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <QrCodeSvg value={`UNIT|${activeSelectedUnit.id}|${activeSelectedUnit.unitNumber}`} size={64} />
-                <button
-                  onClick={() => setSelectedUnit(null)}
-                  className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
               </div>
             </div>
+
+            <div className="p-6 space-y-6">
 
             {/* Sequential Action Card when Unit is Available / Non-Leased */}
             {hasPermission('manage_contracts') && activeSelectedUnit.status !== 'مؤجرة' && (
@@ -713,9 +853,30 @@ export function PropertiesUnitsView() {
                     </button>
                   ))}
                 </div>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  قاعدة العمل: لا تتحول الوحدة المؤجرة إلى «شاغرة» قبل اعتماد محضر الاستلام والإخلاء.
-                </p>
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    قاعدة العمل: لا تتحول الوحدة المؤجرة إلى «شاغرة» قبل اعتماد محضر الاستلام والإخلاء.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <CreateTaskQuickButton
+                      defaultType="صيانة"
+                      defaultTitle={`فحص وتجهيز الوحدة ${activeSelectedUnit.unitNumber}`}
+                      propertyId={activeSelectedUnit.propertyId}
+                      unitId={activeSelectedUnit.id}
+                      relatedLabel={`وحدة ${activeSelectedUnit.unitNumber}`}
+                      compact
+                    />
+                    {activeSelectedUnit.status !== 'مؤجرة' && activeSelectedUnit.status !== 'مؤرشفة' && !activeSelectedUnit.archivedAt && (
+                      <MoveToArchiveButton
+                        category="units"
+                        entityId={activeSelectedUnit.id}
+                        entityLabel={`وحدة ${activeSelectedUnit.unitNumber}`}
+                        compact
+                        onArchived={() => setSelectedUnit(null)}
+                      />
+                    )}
+                  </div>
+                </div>
               </div>
             )}
 
@@ -843,6 +1004,7 @@ export function PropertiesUnitsView() {
                   </div>
                 </div>
               )}
+            </div>
             </div>
           </div>
         </div>
@@ -980,27 +1142,35 @@ export function PropertiesUnitsView() {
               )}
             </div>
             <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => setShowAddProp(false)} className="px-4 py-2 text-xs rounded-lg border border-slate-200 dark:border-white/10 cursor-pointer">
+              <button
+                type="button"
+                onClick={() => setShowAddProp(false)}
+                className="min-h-[44px] px-4 py-2 text-xs rounded-xl border border-slate-200 dark:border-white/10 cursor-pointer"
+              >
                 إلغاء
               </button>
-              <button type="submit" className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#26478D] text-white cursor-pointer">
-                حفظ العقار
+              <button
+                type="submit"
+                disabled={submittingProp}
+                className="min-h-[44px] px-5 py-2 text-xs font-semibold rounded-xl bg-[#26478D] text-white disabled:opacity-50 cursor-pointer"
+              >
+                {submittingProp ? 'جاري الحفظ...' : 'حفظ العقار'}
               </button>
             </div>
           </form>
         </div>
       )}
 
-      {/* Add Unit Modal */}
+      {/* Add Unit Modal with Smart Numeric Keyboards */}
       {showAddUnit && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4">
           <form
             onSubmit={handleCreateUnit}
-            className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#13192B] p-6 space-y-4"
+            className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#13192B] p-6 space-y-4 animate-aqar-fade-scale"
           >
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold">{lang === 'ar' ? 'إضافة وحدة جديدة' : 'New Unit'}</h3>
-              <button type="button" onClick={() => setShowAddUnit(false)} className="cursor-pointer">
+              <button type="button" onClick={() => setShowAddUnit(false)} className="min-w-[40px] min-h-[40px] flex items-center justify-center cursor-pointer">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -1008,7 +1178,7 @@ export function PropertiesUnitsView() {
               <select
                 value={unitForm.propertyId}
                 onChange={(e) => setUnitForm({ ...unitForm, propertyId: e.target.value })}
-                className="col-span-2 px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
+                className="col-span-2 min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
               >
                 {state.properties.map((p) => (
                   <option key={p.id} value={p.id}>
@@ -1021,12 +1191,12 @@ export function PropertiesUnitsView() {
                 placeholder="رقم الوحدة (مثال: A-301)"
                 value={unitForm.unitNumber}
                 onChange={(e) => setUnitForm({ ...unitForm, unitNumber: e.target.value })}
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent"
+                className="min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-transparent font-mono-num"
               />
               <select
                 value={unitForm.unitType}
                 onChange={(e) => setUnitForm({ ...unitForm, unitType: e.target.value as UnitType })}
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
+                className="min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
               >
                 <option value="شقة">شقة</option>
                 <option value="مكتب">مكتب</option>
@@ -1036,13 +1206,16 @@ export function PropertiesUnitsView() {
               </select>
               <input
                 type="number"
+                inputMode="numeric"
                 placeholder="المساحة م²"
                 value={unitForm.areaSqm}
                 onChange={(e) => setUnitForm({ ...unitForm, areaSqm: Number(e.target.value) })}
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent"
+                className="min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-transparent font-mono-num"
               />
               <input
                 type="number"
+                inputMode="decimal"
+                enterKeyHint="done"
                 placeholder="الإيجار السنوي المقترح"
                 value={unitForm.suggestedAnnualRent}
                 onChange={(e) =>
@@ -1052,31 +1225,54 @@ export function PropertiesUnitsView() {
                     suggestedMonthlyRent: Math.round(Number(e.target.value) / 12),
                   })
                 }
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent"
+                className="min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-transparent font-mono-num"
               />
               <input
+                inputMode="numeric"
                 placeholder="رقم عداد الكهرباء"
                 value={unitForm.electricityMeter}
                 onChange={(e) => setUnitForm({ ...unitForm, electricityMeter: e.target.value })}
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent"
+                className="min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-transparent font-mono-num"
               />
               <input
+                inputMode="numeric"
+                enterKeyHint="done"
                 placeholder="رقم عداد المياه"
                 value={unitForm.waterMeter}
                 onChange={(e) => setUnitForm({ ...unitForm, waterMeter: e.target.value })}
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent"
+                className="min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-transparent font-mono-num"
               />
             </div>
             <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => setShowAddUnit(false)} className="px-4 py-2 text-xs rounded-lg border border-slate-200 dark:border-white/10 cursor-pointer">
+              <button type="button" onClick={() => setShowAddUnit(false)} className="min-h-[44px] px-4 py-2 text-xs rounded-xl border border-slate-200 dark:border-white/10 cursor-pointer">
                 إلغاء
               </button>
-              <button type="submit" className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#26478D] text-white cursor-pointer">
-                حفظ الوحدة
+              <button
+                type="submit"
+                disabled={submittingUnit}
+                className="min-h-[44px] px-5 py-2 text-xs font-semibold rounded-xl bg-[#26478D] text-white disabled:opacity-50 cursor-pointer"
+              >
+                {submittingUnit ? 'جاري الحفظ...' : 'حفظ الوحدة'}
               </button>
             </div>
           </form>
         </div>
+      )}
+
+      {/* Mobile Thumb-Zone FAB */}
+      {hasPermission('manage_properties') && (
+        <button
+          type="button"
+          onClick={() => {
+            triggerHaptic('medium');
+            setUnitForm((f) => ({ ...f, propertyId: state.properties[0]?.id || '' }));
+            setShowAddUnit(true);
+          }}
+          className="lg:hidden fixed bottom-[4.4rem] end-4 z-30 min-h-[48px] px-4 rounded-2xl bg-[#26478D] text-white shadow-xl shadow-[#26478D]/35 inline-flex items-center gap-2 text-xs font-bold cursor-pointer active:scale-95 transition-transform no-print"
+        >
+          <Plus className="w-4 h-4" />
+          <span>{lang === 'ar' ? 'وحدة جديدة' : 'Add Unit'}</span>
+        </button>
       )}
     </div>
   );

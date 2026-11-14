@@ -1,11 +1,28 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, Eraser, FileSpreadsheet, PenTool, Plus, Receipt, Search, Wallet, X } from 'lucide-react';
+import {
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Eraser,
+  FileSpreadsheet,
+  PenTool,
+  Plus,
+  Receipt,
+  Search,
+  Wallet,
+  X,
+} from 'lucide-react';
 import { useAqar } from '../context/AqarContext';
 import { CurrencyCode, Installment, Payment, PaymentMethod, PaymentType } from '../types/aqar';
 import { CURRENCY_META, formatCurrency, formatDateTime, formatGregorian } from '../utils/formatters';
+import { triggerHaptic } from '../utils/haptics';
 import { exportFinanceReportToExcel } from '../utils/excelExport';
 import { PrintViewButton } from './PrintViewButton';
 import { ReceiptModal } from './ReceiptModal';
+import { SwipeableRow } from './SwipeableRow';
+import { MoveToArchiveButton } from './MoveToArchiveButton';
 
 export function FinanceCollectionView() {
   const {
@@ -26,6 +43,8 @@ export function FinanceCollectionView() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'paid'>('open');
   const [search, setSearch] = useState('');
   const [selectedReceipt, setSelectedReceipt] = useState<Payment | null>(null);
+  const [payStep, setPayStep] = useState<1 | 2>(1);
+  const [submittingPay, setSubmittingPay] = useState(false);
   const [payModal, setPayModal] = useState<{
     open: boolean;
     contractId: string;
@@ -167,6 +186,7 @@ export function FinanceCollectionView() {
   };
 
   const openCollectModal = (inst?: Installment) => {
+    triggerHaptic('light');
     const targetContractId = inst?.contractId || state.contracts[0]?.id || '';
     const openForContract = state.installments
       .filter((i) => i.contractId === targetContractId && i.remainingAmount > 0)
@@ -180,6 +200,8 @@ export function FinanceCollectionView() {
       autoAllocateOldest: !inst,
       notes: '',
     });
+    setPayStep(1);
+    setSubmittingPay(false);
     setPayModal({
       open: true,
       contractId: targetContractId,
@@ -193,34 +215,54 @@ export function FinanceCollectionView() {
 
   const handleRecordPayment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!payModal) return;
-    const signatureDataUrl =
-      hasSignature && sigCanvasRef.current ? sigCanvasRef.current.toDataURL('image/png') : undefined;
-    const res = await mutate<{ payment?: Payment }>(
-      'POST',
-      '/api/payments',
-      {
-        idempotencyKey: payModal.idempotencyKey,
-        contractId: payModal.contractId,
-        installmentId: payForm.autoAllocateOldest ? undefined : payModal.installmentId,
-        amount: payForm.amount,
-        paymentMethod: payForm.paymentMethod,
-        paymentType: payForm.paymentType,
-        referenceNumber: payForm.referenceNumber,
-        autoAllocateOldest: payForm.autoAllocateOldest,
-        signatureDataUrl,
-        notes: payForm.notes,
-      },
-      {
-        idempotencyKey: payModal.idempotencyKey,
-        offlineDescAr: `تحصيل مبلغ ${payForm.amount} ر.س`,
-        offlineDescEn: `Collect ${payForm.amount} SAR`,
+    if (!payModal || submittingPay) return;
+    if (payStep === 1) {
+      if (!payModal.contractId || payForm.amount <= 0) {
+        triggerHaptic('error');
+        pushToast('error', lang === 'ar' ? 'اختر العقد وأدخل مبلغاً صحيحاً' : 'Select contract and valid amount');
+        return;
       }
-    );
-    setPayModal(null);
-    if (res?.payment) {
-      pushToast('success', `تم إصدار السند ${res.payment.receiptNumber} وترحيل القيد المحاسبي`);
-      setSelectedReceipt(res.payment);
+      triggerHaptic('light');
+      setPayStep(2);
+      return;
+    }
+
+    setSubmittingPay(true);
+    triggerHaptic('medium');
+    try {
+      const signatureDataUrl =
+        hasSignature && sigCanvasRef.current ? sigCanvasRef.current.toDataURL('image/png') : undefined;
+      const res = await mutate<{ payment?: Payment }>(
+        'POST',
+        '/api/payments',
+        {
+          idempotencyKey: payModal.idempotencyKey,
+          contractId: payModal.contractId,
+          installmentId: payForm.autoAllocateOldest ? undefined : payModal.installmentId,
+          amount: payForm.amount,
+          paymentMethod: payForm.paymentMethod,
+          paymentType: payForm.paymentType,
+          referenceNumber: payForm.referenceNumber,
+          autoAllocateOldest: payForm.autoAllocateOldest,
+          signatureDataUrl,
+          notes: payForm.notes,
+        },
+        {
+          idempotencyKey: payModal.idempotencyKey,
+          offlineDescAr: `تحصيل مبلغ ${payForm.amount} ر.س`,
+          offlineDescEn: `Collect ${payForm.amount} SAR`,
+        }
+      );
+      if (res) {
+        triggerHaptic('success');
+        setPayModal(null);
+        if (res.payment) {
+          pushToast('success', `تم إصدار السند ${res.payment.receiptNumber} وترحيل القيد المحاسبي`);
+          setSelectedReceipt(res.payment);
+        }
+      }
+    } finally {
+      setSubmittingPay(false);
     }
   };
 
@@ -376,70 +418,138 @@ export function FinanceCollectionView() {
       </div>
 
       {tab === 'installments' ? (
-        <div className="rounded-2xl border border-slate-200 dark:border-white/10 glass-surface overflow-x-auto">
-          <table className="w-full text-start text-xs">
-            <thead className="bg-slate-50 dark:bg-white/[0.03] text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-white/10">
-              <tr>
-                <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'المستأجر / الوحدة' : 'Tenant / Unit'}</th>
-                <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'تاريخ الاستحقاق' : 'Due Date'}</th>
-                <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'قيمة القسط' : 'Amount'}</th>
-                <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'المدفوع' : 'Paid'}</th>
-                <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'المتبقي' : 'Remaining'}</th>
-                <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'الحالة' : 'Status'}</th>
-                <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'تحصيل' : 'Collect'}</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-white/5">
-              {filteredInstallments.map((inst) => {
-                const tenant = state.tenants.find((t) => t.id === inst.tenantId);
-                const unit = state.units.find((u) => u.id === inst.unitId);
-                const contract = state.contracts.find((c) => c.id === inst.contractId);
-                const cur = inst.currency || contract?.currency || 'SAR';
-                const showConverted = cur !== baseCurrency;
-                return (
-                  <tr key={inst.id} className="hover:bg-slate-50 dark:hover:bg-white/[0.02]">
-                    <td className="py-3 px-4">
-                      <div className="font-semibold">{tenant?.nameAr || '—'}</div>
-                      <div className="text-[11px] text-slate-500 font-mono-num">
-                        {unit?.unitNumber} · {contract?.internalNumber} · قسط #{inst.installmentNumber}
+        <>
+          {/* Mobile Swipeable Cards View */}
+          <div className="md:hidden space-y-3">
+            {filteredInstallments.map((inst) => {
+              const tenant = state.tenants.find((t) => t.id === inst.tenantId);
+              const unit = state.units.find((u) => u.id === inst.unitId);
+              const contract = state.contracts.find((c) => c.id === inst.contractId);
+              const cur = inst.currency || contract?.currency || 'SAR';
+              const canCollect = inst.remainingAmount > 0 && hasPermission('collect_payments');
+              return (
+                <SwipeableRow
+                  key={inst.id}
+                  rightSwipeAction={
+                    canCollect
+                      ? {
+                          label: lang === 'ar' ? 'تسجيل دفعة' : 'Collect',
+                          icon: <Wallet className="w-4 h-4" />,
+                          tone: 'emerald',
+                          onTrigger: () => openCollectModal(inst),
+                        }
+                      : undefined
+                  }
+                >
+                  <div className="p-4 rounded-2xl border border-slate-200 dark:border-white/10 glass-surface space-y-2.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-sm font-bold truncate">{tenant?.nameAr || '—'}</div>
+                        <div className="text-[11px] text-slate-500 font-mono-num">
+                          وحدة {unit?.unitNumber} · قسط #{inst.installmentNumber} · {formatGregorian(inst.dueDate, lang)}
+                        </div>
                       </div>
-                    </td>
-                    <td className="py-3 px-4 font-mono-num">{formatGregorian(inst.dueDate, lang)}</td>
-                    <td className="py-3 px-4 font-mono-num">
-                      <div>{formatInCurrency(inst.amount, cur)}</div>
-                      {showConverted && (
-                        <div className="text-[10px] text-slate-500">≈ {formatConvertedBase(inst.amount, cur)}</div>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 font-mono-num text-emerald-600 dark:text-emerald-400">
-                      {formatInCurrency(inst.paidAmount, cur)}
-                    </td>
-                    <td className="py-3 px-4 font-mono-num font-bold text-amber-600 dark:text-amber-400">
-                      <div>{formatInCurrency(inst.remainingAmount, cur)}</div>
-                      {showConverted && inst.remainingAmount > 0 && (
-                        <div className="text-[10px] font-normal text-slate-500">≈ {formatConvertedBase(inst.remainingAmount, cur)}</div>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 font-semibold">{inst.status}</td>
-                    <td className="py-3 px-4">
-                      {inst.remainingAmount > 0 && hasPermission('collect_payments') ? (
+                      <span
+                        className={`text-[11px] font-semibold shrink-0 ${
+                          inst.status === 'متأخرة'
+                            ? 'text-red-600 dark:text-red-400'
+                            : inst.status === 'مدفوعة بالكامل'
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : 'text-amber-600 dark:text-amber-400'
+                        }`}
+                      >
+                        {inst.status}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200/70 dark:border-white/10">
+                      <div className="text-xs font-mono-num">
+                        <span className="text-slate-500">{lang === 'ar' ? 'المتبقي: ' : 'Due: '}</span>
+                        <span className="font-bold text-amber-600 dark:text-amber-400">
+                          {formatInCurrency(inst.remainingAmount, cur)}
+                        </span>
+                      </div>
+                      {canCollect && (
                         <button
                           onClick={() => openCollectModal(inst)}
-                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#26478D] text-white text-[11px] font-semibold hover:bg-[#1e3a75] cursor-pointer whitespace-nowrap"
+                          className="min-h-[42px] px-4 rounded-xl bg-[#26478D] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
                         >
-                          <Wallet className="w-3 h-3" />
+                          <Wallet className="w-3.5 h-3.5" />
                           <span>{lang === 'ar' ? 'تحصيل' : 'Collect'}</span>
                         </button>
-                      ) : (
-                        <span className="text-slate-400">—</span>
                       )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                    </div>
+                  </div>
+                </SwipeableRow>
+              );
+            })}
+          </div>
+
+          {/* Desktop Table */}
+          <div className="hidden md:block rounded-2xl border border-slate-200 dark:border-white/10 glass-surface overflow-x-auto">
+            <table className="w-full text-start text-xs">
+              <thead className="bg-slate-50 dark:bg-white/[0.03] text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-white/10">
+                <tr>
+                  <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'المستأجر / الوحدة' : 'Tenant / Unit'}</th>
+                  <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'تاريخ الاستحقاق' : 'Due Date'}</th>
+                  <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'قيمة القسط' : 'Amount'}</th>
+                  <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'المدفوع' : 'Paid'}</th>
+                  <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'المتبقي' : 'Remaining'}</th>
+                  <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'الحالة' : 'Status'}</th>
+                  <th className="py-3 px-4 text-start font-medium">{lang === 'ar' ? 'تحصيل' : 'Collect'}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-white/5">
+                {filteredInstallments.map((inst) => {
+                  const tenant = state.tenants.find((t) => t.id === inst.tenantId);
+                  const unit = state.units.find((u) => u.id === inst.unitId);
+                  const contract = state.contracts.find((c) => c.id === inst.contractId);
+                  const cur = inst.currency || contract?.currency || 'SAR';
+                  const showConverted = cur !== baseCurrency;
+                  return (
+                    <tr key={inst.id} className="hover:bg-slate-50 dark:hover:bg-white/[0.02]">
+                      <td className="py-3 px-4">
+                        <div className="font-semibold">{tenant?.nameAr || '—'}</div>
+                        <div className="text-[11px] text-slate-500 font-mono-num">
+                          {unit?.unitNumber} · {contract?.internalNumber} · قسط #{inst.installmentNumber}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 font-mono-num">{formatGregorian(inst.dueDate, lang)}</td>
+                      <td className="py-3 px-4 font-mono-num">
+                        <div>{formatInCurrency(inst.amount, cur)}</div>
+                        {showConverted && (
+                          <div className="text-[10px] text-slate-500">≈ {formatConvertedBase(inst.amount, cur)}</div>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 font-mono-num text-emerald-600 dark:text-emerald-400">
+                        {formatInCurrency(inst.paidAmount, cur)}
+                      </td>
+                      <td className="py-3 px-4 font-mono-num font-bold text-amber-600 dark:text-amber-400">
+                        <div>{formatInCurrency(inst.remainingAmount, cur)}</div>
+                        {showConverted && inst.remainingAmount > 0 && (
+                          <div className="text-[10px] font-normal text-slate-500">≈ {formatConvertedBase(inst.remainingAmount, cur)}</div>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 font-semibold">{inst.status}</td>
+                      <td className="py-3 px-4">
+                        {inst.remainingAmount > 0 && hasPermission('collect_payments') ? (
+                          <button
+                            onClick={() => openCollectModal(inst)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#26478D] text-white text-[11px] font-semibold hover:bg-[#1e3a75] cursor-pointer whitespace-nowrap"
+                          >
+                            <Wallet className="w-3 h-3" />
+                            <span>{lang === 'ar' ? 'تحصيل' : 'Collect'}</span>
+                          </button>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
       ) : (
         <div className="rounded-2xl border border-slate-200 dark:border-white/10 glass-surface overflow-x-auto">
           <table className="w-full text-start text-xs">
@@ -480,13 +590,23 @@ export function FinanceCollectionView() {
                     </td>
                     <td className="py-3 px-4 font-mono-num text-slate-500">{formatDateTime(pay.createdAt, lang)}</td>
                     <td className="py-3 px-4">
-                      <button
-                        onClick={() => setSelectedReceipt(pay)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
-                      >
-                        <Receipt className="w-3.5 h-3.5" />
-                        <span>{lang === 'ar' ? 'معاينة' : 'Open'}</span>
-                      </button>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          onClick={() => setSelectedReceipt(pay)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
+                        >
+                          <Receipt className="w-3.5 h-3.5" />
+                          <span>{lang === 'ar' ? 'معاينة' : 'Open'}</span>
+                        </button>
+                        {!pay.archivedAt && hasPermission('collect_payments') && (
+                          <MoveToArchiveButton
+                            category="receipts"
+                            entityId={pay.id}
+                            entityLabel={pay.receiptNumber}
+                            compact
+                          />
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -496,203 +616,321 @@ export function FinanceCollectionView() {
         </div>
       )}
 
-      {/* Record Payment Modal with Live Partial Payment Calculator & Digital Signature */}
-      {payModal?.open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4 overflow-y-auto">
-          <form
-            onSubmit={handleRecordPayment}
-            className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#13192B] p-6 space-y-4 my-auto"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-base font-bold">{lang === 'ar' ? 'تسجيل تحصيل وإصدار سند قبض' : 'Record Payment & Receipt'}</h3>
-                <div className="text-[11px] text-slate-500 mt-0.5">
-                  {lang === 'ar'
-                    ? '1. تحديد العقد والمبلغ ← 2. المعاينة ← 3. التوقيع الرقمي وإصدار السند'
-                    : '1. Contract & Amount → 2. Preview → 3. Digital Signature & Issue'}
-                </div>
-              </div>
-              <button type="button" onClick={() => setPayModal(null)} className="cursor-pointer">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+      {/* 2-Step Record Payment Wizard Modal */}
+      {payModal?.open && (() => {
+        const selectedContract = state.contracts.find((c) => c.id === payModal.contractId);
+        const selectedTenant = state.tenants.find((t) => t.id === selectedContract?.tenantId);
+        const selectedUnit = state.units.find((u) => u.id === selectedContract?.unitId);
+        const selectedCurrency = selectedContract?.currency || 'SAR';
 
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              <div className="col-span-2">
-                <label className="text-[11px] text-slate-500 block mb-1">العقد المستهدف</label>
-                <select
-                  value={payModal.contractId}
-                  onChange={(e) => {
-                    const cid = e.target.value;
-                    const rem = state.installments
-                      .filter((i) => i.contractId === cid && i.remainingAmount > 0)
-                      .reduce((s, i) => s + i.remainingAmount, 0);
-                    setPayModal({ ...payModal, contractId: cid, installmentId: undefined, maxAmount: rem });
-                    setPayForm((f) => ({ ...f, amount: rem, autoAllocateOldest: true }));
-                  }}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
-                >
-                  {state.contracts.map((c) => {
-                    const ten = state.tenants.find((t) => t.id === c.tenantId);
-                    const u = state.units.find((x) => x.id === c.unitId);
-                    return (
-                      <option key={c.id} value={c.id}>
-                        {c.internalNumber} · {ten?.nameAr} ({u?.unitNumber})
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-[11px] text-slate-500 block mb-1">المبلغ المستلم (يدعم الجزئي)</label>
-                <input
-                  type="number"
-                  required
-                  min={1}
-                  step="0.01"
-                  value={payForm.amount}
-                  onChange={(e) => setPayForm({ ...payForm, amount: Number(e.target.value) })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent font-mono-num font-bold"
-                />
-              </div>
-              <div>
-                <label className="text-[11px] text-slate-500 block mb-1">طريقة الدفع</label>
-                <select
-                  value={payForm.paymentMethod}
-                  onChange={(e) => setPayForm({ ...payForm, paymentMethod: e.target.value as PaymentMethod })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
-                >
-                  <option value="تحويل بنكي">تحويل بنكي</option>
-                  <option value="شبكة مدى">شبكة مدى</option>
-                  <option value="نقدي">نقدي</option>
-                  <option value="سداد إلكتروني">سداد إلكتروني</option>
-                  <option value="شيك">شيك</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-[11px] text-slate-500 block mb-1">نوع العملية</label>
-                <select
-                  value={payForm.paymentType}
-                  onChange={(e) => setPayForm({ ...payForm, paymentType: e.target.value as PaymentType })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
-                >
-                  <option value="إيجار">إيجار</option>
-                  <option value="دفعة مقدمة">دفعة مقدمة</option>
-                  <option value="تأمين">تأمين</option>
-                  <option value="رسوم مكتب وسعي">رسوم مكتب وسعي</option>
-                  <option value="عمولة فسخ">عمولة فسخ</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-[11px] text-slate-500 block mb-1">رقم المرجع / الحوالة</label>
-                <input
-                  placeholder="TRN-..."
-                  value={payForm.referenceNumber}
-                  onChange={(e) => setPayForm({ ...payForm, referenceNumber: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent font-mono-num"
-                />
-              </div>
-            </div>
-
-            {payForm.paymentType === 'إيجار' && (
-              <label className="flex items-center gap-2 text-xs">
-                <input
-                  type="checkbox"
-                  checked={payForm.autoAllocateOldest}
-                  onChange={(e) => setPayForm({ ...payForm, autoAllocateOldest: e.target.checked })}
-                />
-                <span>توزيع الدفعة تلقائياً على أقدم استحقاق مفتوح</span>
-              </label>
-            )}
-
-            {/* Live Partial Payment Preview Card (From Spec Section 4.5!) */}
-            {payForm.paymentType === 'إيجار' && previewDue > 0 && (
-              <div className="p-4 rounded-xl bg-slate-50 dark:bg-white/[0.03] border border-slate-200 dark:border-white/10 space-y-2">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-500">المبلغ المتبقي بعد الدفعة</span>
-                  <span className="text-lg font-bold font-mono-num text-[#26478D] dark:text-blue-400">
-                    {formatInCurrency(
-                      previewRemaining,
-                      state.contracts.find((c) => c.id === payModal.contractId)?.currency || 'SAR'
-                    )}
-                  </span>
-                </div>
-                <div className="h-2 rounded-full bg-slate-200 dark:bg-white/10 overflow-hidden">
-                  <div className="h-full bg-emerald-600 transition-all" style={{ width: `${pctCollected}%` }} />
-                </div>
-                <div className="flex items-center justify-between text-[11px] font-mono-num text-slate-500">
-                  <span>{pctCollected}% محصل</span>
-                  <span>{pctRemaining}% متبقٍ</span>
-                </div>
-              </div>
-            )}
-
-            {/* Progressive Disclosure: Digital Signature Pad */}
-            <div className="rounded-xl border border-slate-200 dark:border-white/10 overflow-hidden">
-              <button
-                type="button"
-                onClick={() => setShowSignaturePad((v) => !v)}
-                className="w-full px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold bg-slate-50 dark:bg-white/[0.03] hover:bg-slate-100 dark:hover:bg-white/[0.06] cursor-pointer"
-              >
-                <span className="inline-flex items-center gap-1.5">
-                  <PenTool className="w-3.5 h-3.5 text-[#26478D] dark:text-blue-400" />
-                  <span>
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4 overflow-y-auto">
+            <form
+              onSubmit={handleRecordPayment}
+              className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#13192B] p-6 space-y-5 my-auto shadow-2xl animate-aqar-fade-scale"
+            >
+              {/* Header & Step Progress Indicator */}
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="text-[11px] font-semibold text-[#26478D] dark:text-blue-400">
                     {lang === 'ar'
-                      ? `التوقيع الإلكتروني للمستلم / المستأجر ${hasSignature ? '(موقّع ✓)' : '(اختياري)'}`
-                      : `Digital Signature ${hasSignature ? '(Signed ✓)' : '(Optional)'}`}
-                  </span>
-                </span>
-                {showSignaturePad ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-              </button>
+                      ? `الخطوة ${payStep} من 2 · معالج التحصيل السريع`
+                      : `Step ${payStep} of 2 · Payment Wizard`}
+                  </div>
+                  <h3 className="text-base font-bold">
+                    {payStep === 1
+                      ? lang === 'ar'
+                        ? 'اختيار المستأجر والمبلغ المستلم'
+                        : 'Select Tenant & Amount'
+                      : lang === 'ar'
+                      ? 'المراجعة والتوقيع وإصدار الإيصال'
+                      : 'Review, Sign & Issue Receipt'}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPayModal(null)}
+                  className="min-w-[40px] min-h-[40px] flex items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
 
-              {showSignaturePad && (
-                <div className="p-3 space-y-2">
-                  <div className="relative rounded-lg border border-dashed border-slate-300 dark:border-white/20 bg-white">
-                    <canvas
-                      ref={sigCanvasRef}
-                      width={420}
-                      height={110}
-                      onPointerDown={onSigPointerDown}
-                      onPointerMove={onSigPointerMove}
-                      onPointerUp={onSigPointerUp}
-                      onPointerCancel={onSigPointerUp}
-                      className="w-full h-[105px] touch-none cursor-crosshair rounded-lg"
+              {/* 2-Step Bar */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className={`h-1.5 rounded-full transition-colors ${payStep >= 1 ? 'bg-[#26478D]' : 'bg-slate-200 dark:bg-white/10'}`} />
+                <div className={`h-1.5 rounded-full transition-colors ${payStep === 2 ? 'bg-emerald-600' : 'bg-slate-200 dark:bg-white/10'}`} />
+              </div>
+
+              {payStep === 1 ? (
+                <div className="space-y-4 text-xs">
+                  <div>
+                    <label className="text-[11px] text-slate-500 block mb-1">
+                      {lang === 'ar' ? 'المستأجر والعقد' : 'Tenant & Contract'}
+                    </label>
+                    <select
+                      value={payModal.contractId}
+                      onChange={(e) => {
+                        const cid = e.target.value;
+                        const rem = state.installments
+                          .filter((i) => i.contractId === cid && i.remainingAmount > 0)
+                          .reduce((s, i) => s + i.remainingAmount, 0);
+                        setPayModal({ ...payModal, contractId: cid, installmentId: undefined, maxAmount: rem });
+                        setPayForm((f) => ({ ...f, amount: rem, autoAllocateOldest: true }));
+                      }}
+                      className="w-full min-h-[48px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
+                    >
+                      {state.contracts.map((c) => {
+                        const ten = state.tenants.find((t) => t.id === c.tenantId);
+                        const u = state.units.find((x) => x.id === c.unitId);
+                        return (
+                          <option key={c.id} value={c.id}>
+                            {ten?.nameAr} · وحدة {u?.unitNumber} ({c.internalNumber})
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[11px] text-slate-500">
+                        {lang === 'ar' ? 'المبلغ المستلم (يفتح لوحة الأرقام تلقائياً)' : 'Amount Received'}
+                      </label>
+                      {previewDue > 0 && (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setPayForm({ ...payForm, amount: Math.round((previewDue / 2) * 100) / 100 })}
+                            className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-white/10 text-[10px] font-semibold cursor-pointer"
+                          >
+                            50%
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPayForm({ ...payForm, amount: previewDue })}
+                            className="px-2 py-0.5 rounded-md bg-[#26478D]/15 text-[#26478D] dark:text-blue-300 text-[10px] font-semibold cursor-pointer"
+                          >
+                            {lang === 'ar' ? 'كامل المستحق' : 'Full'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      enterKeyHint="done"
+                      required
+                      min={1}
+                      step="0.01"
+                      value={payForm.amount || ''}
+                      onChange={(e) => setPayForm({ ...payForm, amount: Number(e.target.value) })}
+                      className="w-full min-h-[52px] px-4 py-2 text-xl rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50/70 dark:bg-[#0A0E1A] font-mono-num font-bold focus:outline-none focus:ring-2 focus:ring-[#26478D]"
                     />
-                    {!hasSignature && (
-                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">
-                        {lang === 'ar' ? 'ارسم التوقيع الرقمي هنا بالماوس أو اللمس...' : 'Sign here with mouse or touch...'}
+                  </div>
+
+                  {payForm.paymentType === 'إيجار' && (
+                    <label className="flex items-center gap-2.5 text-xs min-h-[40px] cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={payForm.autoAllocateOldest}
+                        onChange={(e) => setPayForm({ ...payForm, autoAllocateOldest: e.target.checked })}
+                        className="w-4 h-4 accent-[#26478D]"
+                      />
+                      <span>{lang === 'ar' ? 'توزيع الدفعة تلقائياً على أقدم استحقاق مفتوح' : 'Auto-allocate oldest due installments'}</span>
+                    </label>
+                  )}
+
+                  {/* Live Partial Payment Calculator */}
+                  {payForm.paymentType === 'إيجار' && previewDue > 0 && (
+                    <div className="p-4 rounded-xl bg-slate-50 dark:bg-white/[0.03] border border-slate-200 dark:border-white/10 space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-slate-500">{lang === 'ar' ? 'المتبقي بعد هذه الدفعة' : 'Remaining After Payment'}</span>
+                        <span className="text-lg font-bold font-mono-num text-[#26478D] dark:text-blue-400">
+                          {formatInCurrency(previewRemaining, selectedCurrency)}
+                        </span>
+                      </div>
+                      <div className="h-2 rounded-full bg-slate-200 dark:bg-white/10 overflow-hidden">
+                        <div className="h-full bg-emerald-600 transition-all duration-300" style={{ width: `${pctCollected}%` }} />
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] font-mono-num text-slate-500">
+                        <span>{pctCollected}% محصل</span>
+                        <span>{pctRemaining}% متبقٍ</span>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-end gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setPayModal(null)}
+                      className="min-h-[48px] px-4 py-2 text-xs rounded-xl border border-slate-200 dark:border-white/10 cursor-pointer text-slate-600 dark:text-slate-300"
+                    >
+                      {lang === 'ar' ? 'إلغاء' : 'Cancel'}
+                    </button>
+                    <button
+                      type="submit"
+                      className="flex-1 sm:flex-initial min-h-[48px] px-6 py-2 text-xs font-bold rounded-xl bg-[#26478D] hover:bg-[#1e3a75] text-white inline-flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <span>{lang === 'ar' ? 'المتابعة للمراجعة والتأكيد' : 'Continue to Review'}</span>
+                      <ArrowLeft className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4 text-xs">
+                  {/* Step 2 Summary Box */}
+                  <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/[0.07] space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600 dark:text-slate-300 font-medium">
+                        {selectedTenant?.nameAr} · وحدة {selectedUnit?.unitNumber}
+                      </span>
+                      <span className="text-lg font-bold font-mono-num text-emerald-700 dark:text-emerald-300">
+                        {formatInCurrency(payForm.amount, selectedCurrency)}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      العقد {selectedContract?.internalNumber} · المتبقي المتوقع:{' '}
+                      <strong className="font-mono-num">{formatInCurrency(previewRemaining, selectedCurrency)}</strong>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[11px] text-slate-500 block mb-1">طريقة الدفع</label>
+                      <select
+                        value={payForm.paymentMethod}
+                        onChange={(e) => setPayForm({ ...payForm, paymentMethod: e.target.value as PaymentMethod })}
+                        className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
+                      >
+                        <option value="تحويل بنكي">تحويل بنكي</option>
+                        <option value="شبكة مدى">شبكة مدى</option>
+                        <option value="نقدي">نقدي</option>
+                        <option value="سداد إلكتروني">سداد إلكتروني</option>
+                        <option value="شيك">شيك</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-slate-500 block mb-1">نوع العملية</label>
+                      <select
+                        value={payForm.paymentType}
+                        onChange={(e) => setPayForm({ ...payForm, paymentType: e.target.value as PaymentType })}
+                        className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
+                      >
+                        <option value="إيجار">إيجار</option>
+                        <option value="دفعة مقدمة">دفعة مقدمة</option>
+                        <option value="تأمين">تأمين</option>
+                        <option value="رسوم مكتب وسعي">رسوم مكتب وسعي</option>
+                        <option value="عمولة فسخ">عمولة فسخ</option>
+                      </select>
+                    </div>
+                    <div className="col-span-2">
+                      <label className="text-[11px] text-slate-500 block mb-1">رقم المرجع / الحوالة (اختياري)</label>
+                      <input
+                        placeholder="TRN-..."
+                        value={payForm.referenceNumber}
+                        onChange={(e) => setPayForm({ ...payForm, referenceNumber: e.target.value })}
+                        className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-transparent font-mono-num"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Digital Signature Pad */}
+                  <div className="rounded-xl border border-slate-200 dark:border-white/10 overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setShowSignaturePad((v) => !v)}
+                      className="w-full px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold bg-slate-50 dark:bg-white/[0.03] hover:bg-slate-100 dark:hover:bg-white/[0.06] cursor-pointer"
+                    >
+                      <span className="inline-flex items-center gap-1.5">
+                        <PenTool className="w-3.5 h-3.5 text-[#26478D] dark:text-blue-400" />
+                        <span>
+                          {lang === 'ar'
+                            ? `التوقيع الإلكتروني للمستلم ${hasSignature ? '(موقّع ✓)' : '(اختياري)'}`
+                            : `Digital Signature ${hasSignature ? '(Signed ✓)' : '(Optional)'}`}
+                        </span>
+                      </span>
+                      {showSignaturePad ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                    </button>
+
+                    {showSignaturePad && (
+                      <div className="p-3 space-y-2">
+                        <div className="relative rounded-lg border border-dashed border-slate-300 dark:border-white/20 bg-white">
+                          <canvas
+                            ref={sigCanvasRef}
+                            width={420}
+                            height={100}
+                            onPointerDown={onSigPointerDown}
+                            onPointerMove={onSigPointerMove}
+                            onPointerUp={onSigPointerUp}
+                            onPointerCancel={onSigPointerUp}
+                            className="w-full h-[96px] touch-none cursor-crosshair rounded-lg"
+                          />
+                          {!hasSignature && (
+                            <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">
+                              {lang === 'ar' ? 'وقّع هنا بالإصبع أو الماوس...' : 'Sign here...'}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between text-[11px] text-slate-500">
+                          <span className="font-mono-num text-[10px]">Key: {payModal.idempotencyKey.slice(0, 14)}</span>
+                          <button
+                            type="button"
+                            onClick={clearSignature}
+                            className="inline-flex items-center gap-1 text-red-600 dark:text-red-400 hover:underline cursor-pointer"
+                          >
+                            <Eraser className="w-3 h-3" />
+                            <span>{lang === 'ar' ? 'مسح' : 'Clear'}</span>
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
-                  <div className="flex items-center justify-between text-[11px] text-slate-500">
-                    <span>{lang === 'ar' ? 'يُدمج التوقيع مباشرة في سند القبض المعتمد' : 'Embedded directly on issued receipt'}</span>
+
+                  {/* Step 2 Thumb-Friendly Actions */}
+                  <div className="flex items-center gap-2 pt-2">
                     <button
                       type="button"
-                      onClick={clearSignature}
-                      className="inline-flex items-center gap-1 text-red-600 dark:text-red-400 hover:underline cursor-pointer"
+                      onClick={() => setPayStep(1)}
+                      className="min-h-[48px] px-4 py-2 text-xs rounded-xl border border-slate-200 dark:border-white/10 inline-flex items-center gap-1.5 cursor-pointer text-slate-700 dark:text-slate-200"
                     >
-                      <Eraser className="w-3 h-3" />
-                      <span>{lang === 'ar' ? 'مسح التوقيع' : 'Clear'}</span>
+                      <ArrowRight className="w-4 h-4" />
+                      <span>{lang === 'ar' ? 'تعديل' : 'Back'}</span>
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={submittingPay}
+                      className="flex-1 min-h-[50px] px-5 py-2.5 text-sm font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white inline-flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/25 cursor-pointer"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>
+                        {submittingPay
+                          ? lang === 'ar'
+                            ? 'جاري الإصدار والترحيل...'
+                            : 'Issuing...'
+                          : lang === 'ar'
+                          ? 'إصدار الإيصال المعتمد'
+                          : 'Issue Official Receipt'}
+                      </span>
                     </button>
                   </div>
                 </div>
               )}
-            </div>
+            </form>
+          </div>
+        );
+      })()}
 
-            <div className="flex items-center justify-between pt-2 text-[11px] text-slate-400">
-              <span className="font-mono-num">Key: {payModal.idempotencyKey.slice(0, 16)}</span>
-              <div className="flex gap-2">
-                <button type="button" onClick={() => setPayModal(null)} className="px-4 py-2 text-xs rounded-lg border border-slate-200 dark:border-white/10 cursor-pointer text-slate-600 dark:text-slate-300">
-                  إلغاء
-                </button>
-                <button type="submit" className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#26478D] text-white cursor-pointer">
-                  اعتماد وإصدار السند
-                </button>
-              </div>
-            </div>
-          </form>
-        </div>
+      {/* Mobile Thumb-Zone FAB */}
+      {hasPermission('collect_payments') && (
+        <button
+          type="button"
+          onClick={() => openCollectModal()}
+          className="lg:hidden fixed bottom-[4.4rem] end-4 z-30 min-h-[48px] px-4 rounded-2xl bg-[#26478D] text-white shadow-xl shadow-[#26478D]/35 inline-flex items-center gap-2 text-xs font-bold cursor-pointer active:scale-95 transition-transform no-print"
+        >
+          <Plus className="w-4 h-4" />
+          <span>{lang === 'ar' ? 'تسجيل تحصيل' : 'Collect'}</span>
+        </button>
       )}
 
       {selectedReceipt && <ReceiptModal payment={selectedReceipt} onClose={() => setSelectedReceipt(null)} />}

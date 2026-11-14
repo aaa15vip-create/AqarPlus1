@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { Printer, RotateCcw, X, CheckCircle2, AlertTriangle, MessageCircle } from 'lucide-react';
+import { Printer, RotateCcw, X, CheckCircle2, AlertTriangle, MessageCircle, Download } from 'lucide-react';
 import { Payment } from '../types/aqar';
 import { useAqar } from '../context/AqarContext';
 import { formatDateTime, formatHijri, formatSar, numberToArabicWords } from '../utils/formatters';
+import { triggerHaptic } from '../utils/haptics';
 import { QrCodeSvg } from './QrCodeSvg';
 
 interface ReceiptModalProps {
@@ -30,16 +31,19 @@ export function ReceiptModal({ payment, onClose }: ReceiptModalProps) {
 
   const handleReverse = async () => {
     if (reason.trim().length < 5) {
+      triggerHaptic('error');
       pushToast('error', lang === 'ar' ? 'يرجى كتابة سبب واضح للإلغاء العكسي' : 'Please enter a valid reversal reason');
       return;
     }
     setSubmitting(true);
+    triggerHaptic('warning');
     const res = await mutate('POST', `/api/payments/${payment.id}/reverse`, { reason }, {
       offlineDescAr: `عكس سند ${payment.receiptNumber}`,
       offlineDescEn: `Reverse ${payment.receiptNumber}`,
     });
     setSubmitting(false);
     if (res) {
+      triggerHaptic('success');
       pushToast('success', lang === 'ar' ? `تم إصدار سند عكسي للسند ${payment.receiptNumber}` : 'Receipt reversed');
       setReverseOpen(false);
     }
@@ -52,14 +56,39 @@ export function ReceiptModal({ payment, onClose }: ReceiptModalProps) {
       : `Official Receipt (${payment.receiptNumber}) - ${tenant?.nameEn || ''} | ${property?.nameEn || ''} (${unit?.unitNumber || ''}) | Amount: ${formatSar(payment.amount, 'en')} | Remaining: ${formatSar(contractRemaining, 'en')}`;
   const waHref = `https://wa.me/${cleanWaPhone}?text=${encodeURIComponent(waShareText)}`;
 
+  const handleDownloadReceiptSummary = () => {
+    triggerHaptic('light');
+    const content = [
+      state.settings.nameAr,
+      `رقم السند: ${payment.receiptNumber}`,
+      `الحالة: ${payment.status}`,
+      `التاريخ: ${formatDateTime(payment.createdAt, 'ar')} (${formatHijri(payment.createdAt)})`,
+      `المستأجر: ${tenant?.nameAr || '—'}`,
+      `العقار والوحدة: ${property?.nameAr || ''} · ${unit?.unitNumber || ''}`,
+      `العقد: ${contract?.internalNumber || ''} · إيجار: ${contract?.ejarNumber || '—'}`,
+      `المبلغ المستلم: ${formatSar(payment.amount, 'ar')} (${numberToArabicWords(payment.amount)})`,
+      `طريقة الدفع: ${payment.paymentMethod} ${payment.referenceNumber ? `· ${payment.referenceNumber}` : ''}`,
+      `المتبقي على العقد: ${formatSar(contractRemaining, 'ar')}`,
+    ].join('\n');
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${payment.receiptNumber}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4 overflow-y-auto print:bg-white print:backdrop-blur-none print:items-start print:p-0">
-      <div className="w-full max-w-2xl rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#13192B] text-slate-900 dark:text-slate-100 shadow-2xl print-only-panel">
-        {/* Modal Actions Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-white/10 no-print">
+      <div className="w-full max-w-2xl rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#13192B] text-slate-900 dark:text-slate-100 shadow-2xl print-only-panel animate-aqar-fade-scale">
+        {/* Modal Actions Header — Instant Visual Preview & Dedicated Sharing */}
+        <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 border-b border-slate-200 dark:border-white/10 no-print">
           <div className="flex items-center gap-3">
             <h3 className="text-base font-semibold">
-              {lang === 'ar' ? 'سند قبض مالي معتمد' : 'Official Payment Receipt'}
+              {lang === 'ar' ? 'معاينة سند القبض المعتمد' : 'Official Receipt Preview'}
             </h3>
             <span className="text-xs font-mono-num text-slate-500 dark:text-slate-400">
               {payment.receiptNumber}
@@ -71,15 +100,26 @@ export function ReceiptModal({ payment, onClose }: ReceiptModalProps) {
                 href={waHref}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-emerald-300 dark:border-emerald-500/30 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                onClick={() => triggerHaptic('light')}
+                className="inline-flex items-center gap-1.5 px-3 min-h-[42px] text-xs font-medium rounded-xl border border-emerald-300 dark:border-emerald-500/30 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 transition-colors cursor-pointer whitespace-nowrap shrink-0"
               >
                 <MessageCircle className="w-3.5 h-3.5" />
-                <span>{lang === 'ar' ? 'مشاركة واتساب' : 'WhatsApp'}</span>
+                <span>{lang === 'ar' ? 'واتساب' : 'WhatsApp'}</span>
               </a>
             )}
             <button
-              onClick={() => window.print()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#26478D] text-white hover:bg-[#1e3a75] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              onClick={handleDownloadReceiptSummary}
+              className="inline-flex items-center gap-1.5 px-3 min-h-[42px] text-xs font-medium rounded-xl border border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{lang === 'ar' ? 'تنزيل' : 'Download'}</span>
+            </button>
+            <button
+              onClick={() => {
+                triggerHaptic('light');
+                window.print();
+              }}
+              className="inline-flex items-center gap-1.5 px-3.5 min-h-[42px] text-xs font-semibold rounded-xl bg-[#26478D] text-white hover:bg-[#1e3a75] transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
               <Printer className="w-3.5 h-3.5" />
               <span>{lang === 'ar' ? 'طباعة / PDF' : 'Print / PDF'}</span>
@@ -87,7 +127,7 @@ export function ReceiptModal({ payment, onClose }: ReceiptModalProps) {
             {payment.status === 'معتمد' && hasPermission('reverse_receipts') && (
               <button
                 onClick={() => setReverseOpen((v) => !v)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-red-300 dark:border-red-500/30 text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1.5 px-3 min-h-[42px] text-xs font-medium rounded-xl border border-red-300 dark:border-red-500/30 text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors cursor-pointer whitespace-nowrap shrink-0"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
                 <span>{lang === 'ar' ? 'سند عكسي' : 'Reverse'}</span>
@@ -95,7 +135,7 @@ export function ReceiptModal({ payment, onClose }: ReceiptModalProps) {
             )}
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
+              className="min-w-[42px] min-h-[42px] flex items-center justify-center rounded-xl text-slate-500 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
               aria-label="Close"
             >
               <X className="w-4 h-4" />

@@ -1,11 +1,11 @@
 import React from 'react';
-import { FolderOpen } from 'lucide-react';
+import { Archive, FolderOpen } from 'lucide-react';
 import { useAqar } from '../context/AqarContext';
 import { DocumentArchiveOcrPanel } from './DocumentArchiveOcrPanel';
 import { PrintViewButton } from './PrintViewButton';
 
 export function DocumentsVaultView() {
-  const { state, lang } = useAqar();
+  const { state, lang, setActiveNav } = useAqar();
   const isAr = lang === 'ar';
 
   return (
@@ -21,12 +21,22 @@ export function DocumentsVaultView() {
             </h2>
             <p className="text-xs text-slate-500">
               {isAr
-                ? `إجمالي المستندات المؤرشفة (${state?.documents.length || 0}) · مسح بالكاميرا + استخراج Gemini OCR وربط تلقائي`
-                : `${state?.documents.length || 0} archived documents · Camera Scan & Gemini OCR`}
+                ? `إجمالي المستندات (${state?.documents.length || 0}) · مسح بالكاميرا + استخراج Gemini OCR وربط تلقائي`
+                : `${state?.documents.length || 0} documents · Camera Scan & Gemini OCR`}
             </p>
           </div>
         </div>
-        <PrintViewButton />
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveNav('archive')}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-white/15 glass-surface hover:bg-slate-100 dark:hover:bg-white/10 text-xs font-semibold cursor-pointer"
+          >
+            <Archive className="w-3.5 h-3.5 text-amber-500" />
+            <span>{isAr ? 'فتح الأرشيف الذكي' : 'Open Smart Archive'}</span>
+          </button>
+          <PrintViewButton />
+        </div>
       </div>
 
       <DocumentArchiveOcrPanel />
