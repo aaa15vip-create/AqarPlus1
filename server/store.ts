@@ -108,19 +108,30 @@ function currencyLabelAr(currency: CurrencyCode = 'SAR'): string {
   }
 }
 
-const DATA_DIR = process.env.AQARPLUS_USER_DATA_DIR
-  ? path.resolve(process.env.AQARPLUS_USER_DATA_DIR)
-  : path.resolve(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'aqarplus-db.json');
-const BACKUP_DIR = path.join(DATA_DIR, 'backups');
-const ARCHIVE_DIR = path.join(DATA_DIR, 'archive');
-const DOCUMENTS_DIR = path.join(DATA_DIR, 'documents');
+function getBaseDataDir(): string {
+  return process.env.AQARPLUS_USER_DATA_DIR
+    ? path.resolve(process.env.AQARPLUS_USER_DATA_DIR)
+    : path.resolve(process.cwd(), 'data');
+}
 
-function ensureDirs() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
-  if (!fs.existsSync(ARCHIVE_DIR)) fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
-  if (!fs.existsSync(DOCUMENTS_DIR)) fs.mkdirSync(DOCUMENTS_DIR, { recursive: true });
+function getWorkspacePaths(workspaceId = 'default') {
+  const base = getBaseDataDir();
+  const dataDir = workspaceId === 'default' ? base : path.join(base, 'workspaces', workspaceId);
+  return {
+    dataDir,
+    dbFile: path.join(dataDir, 'aqarplus.sqlite'),
+    jsonFile: path.join(dataDir, 'aqarplus-db.json'),
+    backupDir: path.join(dataDir, 'backups'),
+    archiveDir: path.join(dataDir, 'archive'),
+    documentsDir: path.join(dataDir, 'documents'),
+  };
+}
+
+function ensureWorkspaceDirs(paths: ReturnType<typeof getWorkspacePaths>) {
+  if (!fs.existsSync(paths.dataDir)) fs.mkdirSync(paths.dataDir, { recursive: true });
+  if (!fs.existsSync(paths.backupDir)) fs.mkdirSync(paths.backupDir, { recursive: true });
+  if (!fs.existsSync(paths.archiveDir)) fs.mkdirSync(paths.archiveDir, { recursive: true });
+  if (!fs.existsSync(paths.documentsDir)) fs.mkdirSync(paths.documentsDir, { recursive: true });
 }
 
 function uid(prefix: string): string {
@@ -135,7 +146,20 @@ function pad3(n: number): string {
   return String(n).padStart(3, '0');
 }
 
+export interface ProvisionWorkspaceOptions {
+  companyNameAr: string;
+  companyNameEn?: string;
+  adminNameAr: string;
+  adminEmail: string;
+  adminPhone?: string;
+  password: string;
+  pin?: string;
+  deviceName?: string;
+}
+
 export class AqarStore {
+  public readonly workspaceId: string;
+  private readonly paths: ReturnType<typeof getWorkspacePaths>;
   private sqlite: SqlitePersistence;
   private state: AqarDatabaseState;
   private propIndex = new Map<string, Property>();
@@ -144,11 +168,23 @@ export class AqarStore {
   private contractIndex = new Map<string, LeaseContract>();
   private idempotencyIndex = new Set<string>();
 
-  constructor() {
-    ensureDirs();
-    this.sqlite = new SqlitePersistence(DATA_DIR);
-    this.state = this.loadInitialState();
-    this.sqlite.ensureSeedCredentials(this.state.users);
+  public static workspaceExists(workspaceId: string): boolean {
+    if (workspaceId === 'default') return true;
+    const paths = getWorkspacePaths(workspaceId);
+    return fs.existsSync(paths.dbFile);
+  }
+
+  constructor(workspaceId = 'default', provision?: ProvisionWorkspaceOptions) {
+    this.workspaceId = workspaceId || 'default';
+    this.paths = getWorkspacePaths(this.workspaceId);
+    ensureWorkspaceDirs(this.paths);
+    this.sqlite = new SqlitePersistence(this.paths.dataDir);
+    if (provision) {
+      this.state = this.initializeProvisionedWorkspace(provision);
+    } else {
+      this.state = this.loadInitialState();
+      this.sqlite.ensureSeedCredentials(this.state.users);
+    }
     this.rebuildIndexes();
   }
 
@@ -386,8 +422,22 @@ export class AqarStore {
       archiveLastNightlyRun: parsed.archiveLastNightlyRun || seed.archiveLastNightlyRun,
       archiveSeeded: parsed.archiveSeeded ?? true,
       securityPolicy: parsed.securityPolicy || seed.securityPolicy,
-      loginHistory: Array.isArray(parsed.loginHistory) && parsed.loginHistory.length > 0 ? parsed.loginHistory : seed.loginHistory,
-      syncConflicts: Array.isArray(parsed.syncConflicts) && parsed.syncConflicts.length > 0 ? parsed.syncConflicts : seed.syncConflicts,
+      loginHistory:
+        this.workspaceId !== 'default'
+          ? Array.isArray(parsed.loginHistory)
+            ? parsed.loginHistory
+            : []
+          : Array.isArray(parsed.loginHistory) && parsed.loginHistory.length > 0
+          ? parsed.loginHistory
+          : seed.loginHistory,
+      syncConflicts:
+        this.workspaceId !== 'default'
+          ? Array.isArray(parsed.syncConflicts)
+            ? parsed.syncConflicts
+            : []
+          : Array.isArray(parsed.syncConflicts) && parsed.syncConflicts.length > 0
+          ? parsed.syncConflicts
+          : seed.syncConflicts,
       teamSeeded: parsed.teamSeeded ?? true,
       settings: {
         ...seed.settings,
@@ -475,7 +525,11 @@ export class AqarStore {
           ? parsed.communicationTemplates
           : seed.communicationTemplates,
       meterReadings:
-        Array.isArray(parsed.meterReadings) && parsed.meterReadings.length > 0
+        this.workspaceId !== 'default'
+          ? Array.isArray(parsed.meterReadings)
+            ? parsed.meterReadings
+            : []
+          : Array.isArray(parsed.meterReadings) && parsed.meterReadings.length > 0
           ? parsed.meterReadings
           : seed.meterReadings,
       scheduledReports: Array.isArray(parsed.scheduledReports) ? parsed.scheduledReports : [],
@@ -487,6 +541,117 @@ export class AqarStore {
     };
   }
 
+  private initializeProvisionedWorkspace(input: ProvisionWorkspaceOptions): AqarDatabaseState {
+    const existing = this.sqlite.loadState();
+    if (existing && Array.isArray(existing.users) && existing.users.length > 0) {
+      throw new Error('مساحة العمل هذه مفعّلة مسبقاً — اختر معرّف شركة مختلفاً أو سجّل الدخول');
+    }
+    const base = createInitialSeed();
+    const now = new Date().toISOString();
+    const companyEn = (input.companyNameEn || input.companyNameAr || 'AqarPlus Workspace').trim();
+    const adminId = `usr-${this.workspaceId}-owner`;
+    const adminUser: StaffUser = {
+      id: adminId,
+      companyId: `comp-${this.workspaceId}`,
+      nameAr: input.adminNameAr.trim(),
+      nameEn: input.adminNameAr.trim(),
+      email: input.adminEmail.trim().toLowerCase(),
+      phone: (input.adminPhone || '').trim(),
+      role: 'sys_owner',
+      roleLabelAr: 'مالك النظام',
+      roleLabelEn: 'System Owner',
+      approvalLimitSar: 10000000,
+      deviceName: input.deviceName || 'Web Terminal',
+      lastActiveAt: now,
+      statusState: 'متصل',
+      active: true,
+      security: {
+        hasPin: Boolean(input.pin),
+        lastPasswordChangedAt: now,
+      },
+    };
+    const fresh: AqarDatabaseState = {
+      ...base,
+      settings: {
+        ...base.settings,
+        nameAr: input.companyNameAr.trim(),
+        nameEn: companyEn,
+        email: adminUser.email,
+        phone: adminUser.phone,
+      },
+      companies: [
+        {
+          id: `comp-${this.workspaceId}`,
+          nameAr: input.companyNameAr.trim(),
+          nameEn: companyEn,
+          city: base.settings.city,
+          vatNumber: '',
+          crNumber: '',
+          address: base.settings.address || '',
+          phone: adminUser.phone,
+          email: adminUser.email,
+          bankName: base.settings.bankAccounts?.[0]?.bankName || '',
+          iban: base.settings.bankAccounts?.[0]?.iban || '',
+          receiptFooterAr: '',
+          isDefault: true,
+        },
+      ],
+      users: [adminUser],
+      properties: [],
+      units: [],
+      meterReadings: [],
+      owners: [],
+      vendors: [],
+      tenants: [],
+      leads: [],
+      leadEscalations: [],
+      contracts: [],
+      handovers: [],
+      installments: [],
+      payments: [],
+      journals: [],
+      expenses: [],
+      supplierInvoices: [],
+      recurringExpenses: [],
+      propertyBudgets: [],
+      assets: [],
+      tickets: [],
+      tasks: [],
+      communications: [],
+      documents: [],
+      purchaseOrders: [],
+      decisions: [],
+      notifications: [],
+      reminderLogs: [],
+      auditLogs: [],
+      backups: [],
+      loginHistory: [],
+      syncConflicts: [],
+      zatcaInvoices: [],
+      archiveSeeded: true,
+      teamSeeded: true,
+      rolePermissions: JSON.parse(JSON.stringify(DEFAULT_ROLE_PERMISSIONS)),
+      counters: {
+        receipt: 0,
+        expense: 0,
+        ticket: 0,
+        journal: 0,
+        contract: 0,
+      },
+      processedIdempotencyKeys: [],
+      entityRevisions: {},
+      syncRevision: 1,
+      lastUpdatedAt: now,
+    };
+    this.sqlite.saveState(fresh);
+    const randomPin = crypto.randomInt(100000, 999999).toString();
+    this.sqlite.updateUserCredentials(adminId, {
+      password: input.password,
+      pin: input.pin || randomPin,
+    });
+    return fresh;
+  }
+
   private loadInitialState(): AqarDatabaseState {
     const seed = createInitialSeed();
     try {
@@ -495,14 +660,14 @@ export class AqarStore {
         return this.normalizeParsedState(fromSqlite, seed);
       }
 
-      if (fs.existsSync(DB_FILE)) {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
+      if (this.workspaceId === 'default' && fs.existsSync(this.paths.jsonFile)) {
+        const raw = fs.readFileSync(this.paths.jsonFile, 'utf-8');
         const parsed = JSON.parse(raw) as AqarDatabaseState;
         if (parsed && Array.isArray(parsed.properties) && Array.isArray(parsed.users)) {
           const normalized = this.normalizeParsedState(parsed, seed);
           this.sqlite.saveState(normalized);
           try {
-            fs.copyFileSync(DB_FILE, `${DB_FILE}.migrated.bak`);
+            fs.copyFileSync(this.paths.jsonFile, `${this.paths.jsonFile}.migrated.bak`);
           } catch {
             // ignore backup failure during migration
           }
@@ -517,7 +682,7 @@ export class AqarStore {
   }
 
   private persist(nextState: AqarDatabaseState = this.state) {
-    ensureDirs();
+    ensureWorkspaceDirs(this.paths);
     nextState.syncRevision = (nextState.syncRevision || 0) + 1;
     nextState.lastUpdatedAt = new Date().toISOString();
     this.sqlite.saveState(nextState);
@@ -2313,7 +2478,7 @@ export class AqarStore {
     encryptPassword?: string
   ): BackupSnapshot {
     const user = this.assertPermission(userId, 'backup_restore');
-    ensureDirs();
+    ensureWorkspaceDirs(this.paths);
     const id = uid('bkp');
     const json = JSON.stringify(this.state, null, 2);
     const shouldEncrypt = Boolean(this.state.settings.backupPolicy?.encryptBackups || encryptPassword?.trim());
@@ -2322,10 +2487,10 @@ export class AqarStore {
       ? encryptBackupPayload(json, encryptPassword?.trim() || 'AqarBackup@2026')
       : json;
 
-    const defaultPath = path.join(BACKUP_DIR, `${id}${ext}`);
+    const defaultPath = path.join(this.paths.backupDir, `${id}${ext}`);
     fs.writeFileSync(defaultPath, payloadToWrite, 'utf-8');
     const targetDir = this.getBackupsDir();
-    if (targetDir !== BACKUP_DIR) {
+    if (targetDir !== this.paths.backupDir) {
       try {
         fs.mkdirSync(targetDir, { recursive: true });
         fs.writeFileSync(path.join(targetDir, `${id}${ext}`), payloadToWrite, 'utf-8');
@@ -5972,23 +6137,23 @@ export class AqarStore {
   }
 
   public getBackupsDir(): string {
-    return this.resolveStorageDir(this.state.settings.backupPolicy?.customPath, BACKUP_DIR);
+    return this.resolveStorageDir(this.state.settings.backupPolicy?.customPath, this.paths.backupDir);
   }
 
   public getArchiveDir(): string {
-    return this.resolveStorageDir(this.state.settings.backupPolicy?.archivePath, ARCHIVE_DIR);
+    return this.resolveStorageDir(this.state.settings.backupPolicy?.archivePath, this.paths.archiveDir);
   }
 
   public getDocumentsDir(): string {
-    return this.resolveStorageDir(this.state.settings.backupPolicy?.documentsPath, DOCUMENTS_DIR);
+    return this.resolveStorageDir(this.state.settings.backupPolicy?.documentsPath, this.paths.documentsDir);
   }
 
   private resolveBackupFile(backupId: string): string | null {
     const candidates = [
       path.join(this.getBackupsDir(), `${backupId}.enc.json`),
       path.join(this.getBackupsDir(), `${backupId}.json`),
-      path.join(BACKUP_DIR, `${backupId}.enc.json`),
-      path.join(BACKUP_DIR, `${backupId}.json`),
+      path.join(this.paths.backupDir, `${backupId}.enc.json`),
+      path.join(this.paths.backupDir, `${backupId}.json`),
     ];
     for (const candidate of candidates) {
       if (fs.existsSync(candidate)) return candidate;
@@ -6062,7 +6227,7 @@ export class AqarStore {
   }
 
   public getStorageStatus() {
-    ensureDirs();
+    ensureWorkspaceDirs(this.paths);
     const backupsDir = this.getBackupsDir();
     const archiveDir = this.getArchiveDir();
     const documentsDir = this.getDocumentsDir();
@@ -6074,7 +6239,7 @@ export class AqarStore {
       }
     };
     return {
-      dataDir: DATA_DIR,
+      dataDir: this.paths.dataDir,
       backupsDir,
       archiveDir,
       documentsDir,
@@ -6088,13 +6253,13 @@ export class AqarStore {
 
   public syncFoldersToDisk(userId: string, deviceName?: string) {
     const user = this.assertPermission(userId, 'backup_restore');
-    ensureDirs();
+    ensureWorkspaceDirs(this.paths);
     const backupsDir = this.getBackupsDir();
     let backupsSynced = 0;
     try {
       if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
       for (const bkp of this.state.backups) {
-        const src = path.join(BACKUP_DIR, `${bkp.id}.json`);
+        const src = path.join(this.paths.backupDir, `${bkp.id}.json`);
         const dst = path.join(backupsDir, `${bkp.id}.json`);
         if (fs.existsSync(src) && src !== dst) {
           fs.copyFileSync(src, dst);

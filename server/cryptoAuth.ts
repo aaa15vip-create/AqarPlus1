@@ -3,6 +3,7 @@ import crypto from 'crypto';
 export interface SessionTokenPayload {
   sid: string;
   uid: string;
+  wid?: string;
   role: string;
   deviceName?: string;
   iat: number;

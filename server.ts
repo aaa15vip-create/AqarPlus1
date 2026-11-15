@@ -1,10 +1,11 @@
 import http from 'http';
 import path from 'path';
 import crypto from 'crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import express, { NextFunction, Request, Response } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import dotenv from 'dotenv';
-import { AqarStore } from './server/store';
+import { AqarStore, ProvisionWorkspaceOptions } from './server/store';
 import { extractDocumentDataWithGemini } from './server/ocr';
 import { signSessionToken, verifySessionToken } from './server/cryptoAuth';
 import { dispatchSyncOperation } from './server/syncDispatcher';
@@ -31,10 +32,68 @@ function resolvePort(): number {
 }
 
 const PORT = resolvePort();
-const store = new AqarStore();
+
+function normalizeWorkspaceId(raw?: string | null): string {
+  const clean = (raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return clean.length >= 3 && clean.length <= 40 ? clean : 'default';
+}
+
+function resolveRequestWorkspaceId(req: http.IncomingMessage): string {
+  const headerWs = req.headers['x-workspace-id'];
+  if (typeof headerWs === 'string' && headerWs.trim()) {
+    return normalizeWorkspaceId(headerWs);
+  }
+  const rawUrl = req.url || '/';
+  const qIdx = rawUrl.indexOf('?');
+  if (qIdx >= 0) {
+    const params = new URLSearchParams(rawUrl.slice(qIdx + 1));
+    const qWs = params.get('workspace');
+    if (qWs) return normalizeWorkspaceId(qWs);
+  }
+  return 'default';
+}
+
+const workspaceStores = new Map<string, AqarStore>();
+const workspaceAls = new AsyncLocalStorage<{ workspaceId: string; store: AqarStore }>();
+
+function getExistingWorkspaceStore(workspaceId = 'default'): AqarStore | null {
+  const clean = normalizeWorkspaceId(workspaceId);
+  const cached = workspaceStores.get(clean);
+  if (cached) return cached;
+  if (clean !== 'default' && !AqarStore.workspaceExists(clean)) {
+    return null;
+  }
+  const created = new AqarStore(clean);
+  workspaceStores.set(clean, created);
+  return created;
+}
+
+function provisionNewWorkspaceStore(workspaceId: string, opts: ProvisionWorkspaceOptions): AqarStore {
+  const clean = normalizeWorkspaceId(workspaceId);
+  if (clean === 'default' || workspaceStores.has(clean) || AqarStore.workspaceExists(clean)) {
+    throw new Error('مساحة العمل هذه مفعّلة مسبقاً — اختر معرّف شركة مختلفاً أو سجّل الدخول');
+  }
+  const created = new AqarStore(clean, opts);
+  workspaceStores.set(clean, created);
+  return created;
+}
+
+const store = new Proxy({} as AqarStore, {
+  get(_target, prop) {
+    const active = workspaceAls.getStore()?.store || getExistingWorkspaceStore('default')!;
+    const value = (active as unknown as Record<PropertyKey, unknown>)[prop];
+    return typeof value === 'function' ? value.bind(active) : value;
+  },
+});
 
 interface AuthenticatedActor {
   userId: string;
+  workspaceId: string;
   role: string;
   sessionId: string;
   rawToken: string;
@@ -46,6 +105,7 @@ type AuthedRequest = Request & { authActor?: AuthenticatedActor };
 
 interface ClientSession {
   ws: WebSocket;
+  workspaceId: string;
   sessionId: string;
   userId: string;
   authenticated: boolean;
@@ -92,13 +152,17 @@ function extractSessionToken(req: http.IncomingMessage): string | null {
 }
 
 function resolveSessionActor(req: http.IncomingMessage, overrideToken?: string): AuthenticatedActor | null {
+  const workspaceId = resolveRequestWorkspaceId(req);
+  const wsStore = getExistingWorkspaceStore(workspaceId);
+  if (!wsStore) return null;
   const rawToken = overrideToken || extractSessionToken(req);
   if (!rawToken) return null;
-  const payload = verifySessionToken(rawToken, store.getSessionSecret());
+  const payload = verifySessionToken(rawToken, wsStore.getSessionSecret());
   if (!payload) return null;
-  const dbSession = store.getPersistence().isSessionActive(rawToken);
+  if (payload.wid && payload.wid !== workspaceId) return null;
+  const dbSession = wsStore.getPersistence().isSessionActive(rawToken);
   if (!dbSession || dbSession.userId !== payload.uid) return null;
-  const user = store.getState().users.find((u) => u.id === payload.uid && u.active);
+  const user = wsStore.getState().users.find((u) => u.id === payload.uid && u.active);
   if (!user) return null;
 
   const rawDevice = req.headers['x-device-name'];
@@ -112,6 +176,7 @@ function resolveSessionActor(req: http.IncomingMessage, overrideToken?: string):
   }
   return {
     userId: user.id,
+    workspaceId,
     role: user.role,
     sessionId: payload.sid,
     rawToken,
@@ -124,17 +189,19 @@ function issueUserSession(
   res: Response,
   userId: string,
   role: string,
-  deviceName = 'Web Terminal'
+  deviceName = 'Web Terminal',
+  workspaceId = workspaceAls.getStore()?.workspaceId || 'default'
 ): { token: string; expiresAt: string } {
+  const wsStore = getExistingWorkspaceStore(workspaceId)!;
   const now = Date.now();
   const exp = now + SESSION_TTL_MS;
   const expiresAt = new Date(exp).toISOString();
   const sid = `ses-${crypto.randomBytes(8).toString('hex')}`;
   const token = signSessionToken(
-    { sid, uid: userId, role, deviceName, iat: now, exp },
-    store.getSessionSecret()
+    { sid, uid: userId, wid: workspaceId, role, deviceName, iat: now, exp },
+    wsStore.getSessionSecret()
   );
-  store.getPersistence().createSession(token, userId, deviceName, expiresAt);
+  wsStore.getPersistence().createSession(token, userId, deviceName, expiresAt);
   res.cookie(SESSION_COOKIE_NAME, token, {
     httpOnly: true,
     sameSite: 'lax',
@@ -144,8 +211,10 @@ function issueUserSession(
   return { token, expiresAt };
 }
 
-function getPresenceList() {
-  const state = store.getState();
+function getPresenceList(workspaceId = workspaceAls.getStore()?.workspaceId || 'default') {
+  const wsStore = getExistingWorkspaceStore(workspaceId);
+  if (!wsStore) return [];
+  const state = wsStore.getState();
   const seen = new Map<
     string,
     {
@@ -159,7 +228,7 @@ function getPresenceList() {
     }
   >();
   for (const s of activeSessions.values()) {
-    if (!s.authenticated) continue;
+    if (!s.authenticated || s.workspaceId !== workspaceId) continue;
     const user = state.users.find((u) => u.id === s.userId);
     if (user) {
       seen.set(s.sessionId, {
@@ -176,25 +245,31 @@ function getPresenceList() {
   return Array.from(seen.values());
 }
 
-function broadcastPresence() {
-  const payload = JSON.stringify({ type: 'presence:update', sessions: getPresenceList() });
+function broadcastPresence(workspaceId = workspaceAls.getStore()?.workspaceId || 'default') {
+  const payload = JSON.stringify({ type: 'presence:update', sessions: getPresenceList(workspaceId) });
   for (const [client, session] of activeSessions.entries()) {
-    if (session.authenticated && client.readyState === WebSocket.OPEN) {
+    if (session.authenticated && session.workspaceId === workspaceId && client.readyState === WebSocket.OPEN) {
       client.send(payload);
     }
   }
 }
 
-function broadcastStateChange(actorUserId: string, eventSummary: string) {
+function broadcastStateChange(
+  actorUserId: string,
+  eventSummary: string,
+  workspaceId = workspaceAls.getStore()?.workspaceId || 'default'
+) {
+  const wsStore = getExistingWorkspaceStore(workspaceId);
+  if (!wsStore) return;
   for (const [client, session] of activeSessions.entries()) {
-    if (session.authenticated && client.readyState === WebSocket.OPEN) {
+    if (session.authenticated && session.workspaceId === workspaceId && client.readyState === WebSocket.OPEN) {
       try {
         client.send(
           JSON.stringify({
             type: 'state:updated',
             actorUserId,
             summary: eventSummary,
-            state: store.getStateForUser(session.userId),
+            state: wsStore.getStateForUser(session.userId),
           })
         );
       } catch {
@@ -214,6 +289,7 @@ function getActor(req: Request): AuthenticatedActor {
 
 const PUBLIC_API_EXACT = new Set([
   '/api/health',
+  '/api/workspaces/provision',
   '/api/auth/session',
   '/api/auth/login',
   '/api/auth/login-pin',
@@ -225,18 +301,120 @@ const PUBLIC_API_EXACT = new Set([
 function handleApi(app: express.Express) {
   app.use(express.json({ limit: '15mb' }));
 
+  app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+    const workspaceId = resolveRequestWorkspaceId(req);
+    const fullPath = `/api${req.path}`;
+    if (fullPath === '/api/workspaces/provision') {
+      return next();
+    }
+    const wsStore = getExistingWorkspaceStore(workspaceId);
+    if (!wsStore) {
+      if (fullPath === '/api/auth/session') {
+        return res.json({
+          authenticated: false,
+          workspaceId,
+          workspaceExists: false,
+          demoLoginEnabled: process.env.AQAR_DEMO_LOGIN === 'true',
+          loginProfiles: [],
+          companyBranding: {
+            nameAr: 'مساحة عمل جديدة',
+            nameEn: 'New Workspace',
+          },
+        });
+      }
+      if (fullPath === '/api/auth/login' || fullPath === '/api/auth/login-pin') {
+        return res.status(401).json({
+          error: 'معرّف الشركة غير مسجل بعد — اضغط «شركة جديدة» لتأسيسها أو تأكد من Workspace ID',
+        });
+      }
+      return res.status(401).json({
+        error: 'انتهت الجلسة أو لم يتم تسجيل الدخول — يرجى المصادقة للمتابعة',
+        code: 'AUTH_REQUIRED',
+      });
+    }
+    workspaceAls.run({ workspaceId, store: wsStore }, () => next());
+  });
+
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({
       ok: true,
+      workspaceId: workspaceAls.getStore()?.workspaceId || 'default',
       lastUpdatedAt: store.getState().lastUpdatedAt,
       sqlite: store.getPersistence().getDiagnostics(),
     });
+  });
+
+  app.post('/api/workspaces/provision', (req: Request, res: Response) => {
+    try {
+      const requestedSlug = String(req.body?.workspaceSlug || '');
+      const headerWs = req.headers['x-workspace-id'];
+      const workspaceId = normalizeWorkspaceId(
+        requestedSlug || (typeof headerWs === 'string' ? headerWs : '')
+      );
+      if (workspaceId === 'default') {
+        return res.status(400).json({
+          error: 'يرجى اختيار معرّف شركة مخصص باللغة الإنجليزية (3 أحرف على الأقل)',
+        });
+      }
+      const companyNameAr = String(req.body?.companyNameAr || '').trim();
+      const companyNameEn = String(req.body?.companyNameEn || companyNameAr || 'AqarPlus Workspace').trim();
+      const adminNameAr = String(req.body?.adminNameAr || '').trim();
+      const adminEmail = String(req.body?.adminEmail || '').trim().toLowerCase();
+      const adminPhone = String(req.body?.adminPhone || '').trim();
+      const password = String(req.body?.password || '');
+      const pin = String(req.body?.pin || '').trim();
+
+      if (!companyNameAr || !adminNameAr || !adminEmail || password.length < 8) {
+        return res.status(400).json({
+          error: 'يلزم إدخال اسم الشركة، واسم المدير، والبريد الإلكتروني، وكلمة مرور لا تقل عن 8 أحرف',
+        });
+      }
+      if (pin && !/^\d{4,6}$/.test(pin)) {
+        return res.status(400).json({ error: 'رمز PIN يجب أن يتكون من 4 إلى 6 أرقام فقط' });
+      }
+
+      const deviceName = String(req.body?.deviceName || 'Web Terminal');
+      const provisionedStore = provisionNewWorkspaceStore(workspaceId, {
+        companyNameAr,
+        companyNameEn,
+        adminNameAr,
+        adminEmail,
+        adminPhone,
+        password,
+        pin: pin || undefined,
+        deviceName,
+      });
+
+      return workspaceAls.run({ workspaceId, store: provisionedStore }, () => {
+        const adminUser = provisionedStore.getState().users[0];
+        const { token, expiresAt } = issueUserSession(
+          res,
+          adminUser.id,
+          adminUser.role,
+          deviceName,
+          workspaceId
+        );
+        res.status(201).json({
+          ok: true,
+          workspaceId,
+          authenticated: true,
+          user: adminUser,
+          token,
+          expiresAt,
+          state: provisionedStore.getStateForUser(adminUser.id),
+        });
+      });
+    } catch (e: unknown) {
+      const msg = (e as Error).message || 'تعذر تأسيس مساحة العمل';
+      res.status(msg.includes('مفعّلة مسبقاً') ? 409 : 400).json({ error: msg });
+    }
   });
 
   // Authentication & Session Endpoints
   app.get('/api/auth/session', (req: Request, res: Response) => {
     const settings = store.getState().settings;
     const demoLoginEnabled = process.env.AQAR_DEMO_LOGIN === 'true';
+    const workspaceId = workspaceAls.getStore()?.workspaceId || 'default';
     const companyBranding = {
       nameAr: settings.nameAr,
       nameEn: settings.nameEn,
@@ -246,6 +424,8 @@ function handleApi(app: express.Express) {
     if (!actor) {
       return res.json({
         authenticated: false,
+        workspaceId,
+        workspaceExists: true,
         demoLoginEnabled,
         loginProfiles: demoLoginEnabled ? store.getLoginProfiles() : [],
         companyBranding,
@@ -254,6 +434,8 @@ function handleApi(app: express.Express) {
     const user = store.getState().users.find((u) => u.id === actor.userId);
     res.json({
       authenticated: true,
+      workspaceId,
+      workspaceExists: true,
       user,
       token: actor.rawToken,
       demoLoginEnabled,
@@ -1762,10 +1944,13 @@ export async function startServer(customPort?: number) {
   wss.on('connection', (ws, req) => {
     const fallbackSessionId = `ses-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const ipAddress = extractClientIp(req);
-    const upgradeActor = resolveSessionActor(req);
+    const workspaceId = resolveRequestWorkspaceId(req);
+    const wsStore = getExistingWorkspaceStore(workspaceId);
+    const upgradeActor = wsStore ? resolveSessionActor(req) : null;
 
     activeSessions.set(ws, {
       ws,
+      workspaceId,
       sessionId: upgradeActor?.sessionId || fallbackSessionId,
       userId: upgradeActor?.userId || '',
       authenticated: Boolean(upgradeActor),
@@ -1774,15 +1959,15 @@ export async function startServer(customPort?: number) {
       connectedAt: new Date().toISOString(),
     });
 
-    if (upgradeActor) {
+    if (upgradeActor && wsStore) {
       ws.send(
         JSON.stringify({
           type: 'state:init',
-          state: store.getStateForUser(upgradeActor.userId),
-          presence: getPresenceList(),
+          state: wsStore.getStateForUser(upgradeActor.userId),
+          presence: getPresenceList(workspaceId),
         })
       );
-      broadcastPresence();
+      broadcastPresence(workspaceId);
     }
 
     ws.on('message', (raw) => {
@@ -1790,14 +1975,19 @@ export async function startServer(customPort?: number) {
         const msg = JSON.parse(String(raw));
         if (msg.type === 'session:identify') {
           const prev = activeSessions.get(ws);
-          const verifiedActor = resolveSessionActor(req, typeof msg.token === 'string' ? msg.token : undefined);
-          if (!verifiedActor) {
+          const msgWsId = prev?.workspaceId || workspaceId;
+          const activeWsStore = getExistingWorkspaceStore(msgWsId);
+          const verifiedActor = activeWsStore
+            ? resolveSessionActor(req, typeof msg.token === 'string' ? msg.token : undefined)
+            : null;
+          if (!verifiedActor || !activeWsStore) {
             ws.send(JSON.stringify({ type: 'auth:required', error: 'جلسة WebSocket غير مصرح بها' }));
             return;
           }
           const nextDevice = String(msg.deviceName || verifiedActor.deviceName || 'Web Browser');
           activeSessions.set(ws, {
             ws,
+            workspaceId: msgWsId,
             sessionId: verifiedActor.sessionId || prev?.sessionId || fallbackSessionId,
             userId: verifiedActor.userId,
             authenticated: true,
@@ -1808,11 +1998,11 @@ export async function startServer(customPort?: number) {
           ws.send(
             JSON.stringify({
               type: 'state:init',
-              state: store.getStateForUser(verifiedActor.userId),
-              presence: getPresenceList(),
+              state: activeWsStore.getStateForUser(verifiedActor.userId),
+              presence: getPresenceList(msgWsId),
             })
           );
-          broadcastPresence();
+          broadcastPresence(msgWsId);
         }
       } catch {
         // Ignore malformed WS payloads
@@ -1820,8 +2010,9 @@ export async function startServer(customPort?: number) {
     });
 
     ws.on('close', () => {
+      const closed = activeSessions.get(ws);
       activeSessions.delete(ws);
-      broadcastPresence();
+      broadcastPresence(closed?.workspaceId || workspaceId);
     });
   });
 
@@ -1847,7 +2038,10 @@ export async function startServer(customPort?: number) {
   });
 
   server.on('close', () => {
-    store.getPersistence().close();
+    for (const st of workspaceStores.values()) {
+      st.getPersistence().close();
+    }
+    workspaceStores.clear();
   });
 
   await new Promise<void>((resolve) => {

@@ -385,7 +385,49 @@ async function runTests() {
     assert.equal(lockedRes.status, 429, 'Account must be locked (HTTP 429) after 5 failed attempts');
     console.log('✓ 11. Brute-force account lockout (5 attempts -> HTTP 429) verified');
 
-    console.log('\n✅ ALL 11 NODE/SQLITE END-TO-END VERIFICATION CHECKS PASSED!\n');
+    // 12. Node/Express multi-company provisioning + cross-workspace token isolation
+    const nodeProvRes = await fetch(`${BASE_URL_2}/api/workspaces/provision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-workspace-id': 'node-alpha-co' },
+      body: JSON.stringify({
+        workspaceSlug: 'node-alpha-co',
+        companyNameAr: 'شركة ألفا المحلية',
+        adminNameAr: 'مدير ألفا',
+        adminEmail: 'alpha.local@aqarplus.sa',
+        password: 'AlphaNodePassword!99',
+        pin: '2580',
+      }),
+    });
+    assert.equal(nodeProvRes.status, 201);
+    const nodeAlphaAuth = await nodeProvRes.json();
+    assert.equal(nodeAlphaAuth.workspaceId, 'node-alpha-co');
+    assert.equal(nodeAlphaAuth.state.properties.length, 0);
+
+    // Duplicate provisioning of same workspace must fail with 409
+    const nodeHijack = await fetch(`${BASE_URL_2}/api/workspaces/provision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-workspace-id': 'node-alpha-co' },
+      body: JSON.stringify({
+        workspaceSlug: 'node-alpha-co',
+        companyNameAr: 'شركة مزيفة',
+        adminNameAr: 'مخترق',
+        adminEmail: 'evil@aqarplus.sa',
+        password: 'EvilPassword!99',
+      }),
+    });
+    assert.equal(nodeHijack.status, 409);
+
+    // Cross-workspace token replay into default workspace must fail with 401
+    const crossNodeRes = await fetch(`${BASE_URL_2}/api/state`, {
+      headers: {
+        Authorization: `Bearer ${nodeAlphaAuth.token}`,
+        'x-workspace-id': 'default',
+      },
+    });
+    assert.equal(crossNodeRes.status, 401, 'Workspace token must be rejected on default workspace');
+    console.log('✓ 12. Node/SQLite multi-company provisioning & cross-workspace token isolation verified');
+
+    console.log('\n✅ ALL 12 NODE/SQLITE END-TO-END VERIFICATION CHECKS PASSED!\n');
   } finally {
     await new Promise((r) => started.server.close(r));
     fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true });

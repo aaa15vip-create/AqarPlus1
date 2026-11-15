@@ -95,10 +95,25 @@ export function AuthLoginScreen() {
     }
   };
 
+  const sanitizeSlugInput = (raw: string) =>
+    raw
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+
+  const generateAutoSlug = () => {
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const fromName = sanitizeSlugInput(newCompanyAr);
+    const generated = fromName.length >= 3 ? `${fromName.slice(0, 20)}-${suffix}` : `co-${suffix}`;
+    setNewSlug(generated);
+  };
+
   const handleProvisionSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newSlug.trim() || !newCompanyAr.trim() || !newAdminName.trim() || !newAdminEmail.trim()) {
-      setErrorMsg(isAr ? 'يرجى إكمال كافة الحقول المطلوبة' : 'Please fill all required fields');
+    if (!newCompanyAr.trim() || !newAdminName.trim() || !newAdminEmail.trim()) {
+      setErrorMsg(isAr ? 'يرجى إدخال اسم الشركة واسم المدير والبريد الإلكتروني' : 'Please fill required company and owner fields');
       return;
     }
     if (newAdminPassword.length < 8) {
@@ -109,10 +124,17 @@ export function AuthLoginScreen() {
       setErrorMsg(isAr ? 'رمز PIN يجب أن يتكون من 4 إلى 6 أرقام' : 'PIN must be 4-6 digits');
       return;
     }
+    let cleanSlug = sanitizeSlugInput(newSlug);
+    if (cleanSlug.length < 3 || cleanSlug === 'default') {
+      const fromName = sanitizeSlugInput(newCompanyAr);
+      const suffix = Date.now().toString(36).slice(-4);
+      cleanSlug = fromName.length >= 3 ? `${fromName.slice(0, 20)}-${suffix}` : `co-${suffix}`;
+      setNewSlug(cleanSlug);
+    }
     setBusy(true);
     setErrorMsg('');
     const result = await provisionWorkspace({
-      workspaceSlug: newSlug.trim().toLowerCase(),
+      workspaceSlug: cleanSlug,
       companyNameAr: newCompanyAr.trim(),
       adminNameAr: newAdminName.trim(),
       adminEmail: newAdminEmail.trim(),
@@ -435,13 +457,21 @@ export function AuthLoginScreen() {
             <form onSubmit={handleProvisionSubmit} className="space-y-3 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-blue-100/90 mb-1 font-medium">
-                    {isAr ? 'معرّف الشركة الفريد (إنجليزي)' : 'Company Workspace Slug'}
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-blue-100/90 font-medium">
+                      {isAr ? 'معرّف الشركة (اختياري — يُولَّد تلقائياً)' : 'Company Workspace Slug (Auto if blank)'}
+                    </label>
+                    <button
+                      type="button"
+                      onClick={generateAutoSlug}
+                      className="text-[10px] text-emerald-300 hover:text-emerald-200 underline cursor-pointer"
+                    >
+                      {isAr ? 'توليد تلقائي' : 'Auto-generate'}
+                    </button>
+                  </div>
                   <input
                     type="text"
                     dir="ltr"
-                    required
                     value={newSlug}
                     onChange={(e) => setNewSlug(e.target.value)}
                     placeholder="alnoor-properties"
@@ -559,10 +589,22 @@ export function AuthLoginScreen() {
                 : 'Every company runs in an isolated SQLite store bound by HMAC-SHA256 workspace tokens, brute-force lockout protection, and AES-256-GCM encrypted backups.'}
             </p>
             {!demoLoginEnabled && (
-              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-400/25 text-[11px] text-emerald-200 leading-relaxed">
-                {isAr
-                  ? 'وضع الإنتاج الآمن مفعّل: تم تعطيل الدخول التجريبي السريع وإخفاء قائمة الحسابات من الواجهة العامة.'
-                  : 'Production security active: Demo quick-login and public user enumeration are disabled.'}
+              <div className="space-y-2.5">
+                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-400/25 text-[11px] text-emerald-200 leading-relaxed">
+                  {isAr
+                    ? 'وضع الإنتاج الآمن مفعّل: تم تعطيل الدخول التجريبي السريع وإخفاء قائمة الحسابات من الواجهة العامة.'
+                    : 'Production security active: Demo quick-login and public user enumeration are disabled.'}
+                </div>
+                <div className="p-3 rounded-xl bg-white/5 border border-white/10 text-[11px] text-blue-100/90 space-y-1.5 leading-relaxed">
+                  <div className="font-bold text-white">
+                    {isAr ? 'مستخدم جديد؟' : 'New to AqarPlus?'}
+                  </div>
+                  <p>
+                    {isAr
+                      ? 'اضغط على تبويب «شركة جديدة» بالأعلى لإنشاء شركتك وحساب المالك بكلمة مرور ورمز PIN من اختيارك فوراً، أو أدخل بيانات شركتك القائمة لتسجيل الدخول.'
+                      : 'Switch to the "New Company" tab above to provision your isolated company database and owner credentials immediately, or sign in to an existing workspace.'}
+                  </p>
+                </div>
               </div>
             )}
           </div>
