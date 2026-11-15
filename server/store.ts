@@ -5,6 +5,8 @@ import {
   AqarDatabaseState,
   ArchiveCategoryId,
   AuditLog,
+  BackupCollectionDiff,
+  BackupPreviewResult,
   BackupSnapshot,
   CommunicationLog,
   CommunicationTemplate,
@@ -26,6 +28,7 @@ import {
   LeadInteraction,
   LeaseContract,
   LoginAuditEntry,
+  LoginProfileSummary,
   MaintenanceTicket,
   NotificationItem,
   OcrEntityMatchResult,
@@ -70,6 +73,12 @@ import {
   ZatcaInvoiceRecord,
 } from '../src/types/aqar';
 import { createInitialSeed, DEFAULT_ROLE_PERMISSIONS } from './seed';
+import {
+  decryptBackupPayload,
+  encryptBackupPayload,
+  isEncryptedBackupEnvelope,
+} from './cryptoAuth';
+import { SqlitePersistence } from './sqlitePersistence';
 
 const RATES_TO_SAR: Record<CurrencyCode, number> = {
   SAR: 1,
@@ -127,6 +136,7 @@ function pad3(n: number): string {
 }
 
 export class AqarStore {
+  private sqlite: SqlitePersistence;
   private state: AqarDatabaseState;
   private propIndex = new Map<string, Property>();
   private unitIndex = new Map<string, Unit>();
@@ -136,8 +146,153 @@ export class AqarStore {
 
   constructor() {
     ensureDirs();
-    this.state = this.loadFromDisk();
+    this.sqlite = new SqlitePersistence(DATA_DIR);
+    this.state = this.loadInitialState();
+    this.sqlite.ensureSeedCredentials(this.state.users);
     this.rebuildIndexes();
+  }
+
+  public getPersistence(): SqlitePersistence {
+    return this.sqlite;
+  }
+
+  public getSessionSecret(): string {
+    return this.sqlite.getOrCreateSessionSecret();
+  }
+
+  public getLoginProfiles(): LoginProfileSummary[] {
+    return this.state.users
+      .filter((u) => u.active)
+      .map((u) => ({
+        id: u.id,
+        nameAr: u.nameAr,
+        nameEn: u.nameEn,
+        email: u.email,
+        role: u.role,
+        roleLabelAr: u.roleLabelAr,
+        roleLabelEn: u.roleLabelEn,
+        hasPin: this.sqlite.getCredentialStatus(u.id).hasPin,
+      }));
+  }
+
+  public authenticatePassword(identifier: string, password: string, deviceName?: string): StaffUser {
+    const norm = (identifier || '').trim().toLowerCase();
+    const user = this.state.users.find(
+      (u) => u.id.toLowerCase() === norm || u.email.toLowerCase() === norm || u.phone === identifier.trim()
+    );
+    if (!user) {
+      throw new Error('بيانات الدخول غير صحيحة');
+    }
+    if (!user.active) {
+      throw new Error('تم إيقاف هذا الحساب من قِبل الإدارة');
+    }
+    if (!this.sqlite.verifyUserPassword(user.id, password)) {
+      if (!user.security) user.security = {};
+      user.security.failedAttempts = (user.security.failedAttempts || 0) + 1;
+      this.recordLoginEvent({
+        userId: user.id,
+        deviceName: deviceName || user.deviceName,
+        method: 'كلمة المرور',
+        success: false,
+      });
+      this.persist();
+      throw new Error('كلمة المرور غير صحيحة');
+    }
+    if (user.security) {
+      user.security.failedAttempts = 0;
+    }
+    user.statusState = 'متصل';
+    this.recordLoginEvent({
+      userId: user.id,
+      deviceName: deviceName || user.deviceName,
+      method: 'كلمة المرور',
+      success: true,
+    });
+    this.persist();
+    return user;
+  }
+
+  public authenticatePin(userId: string, pin: string, deviceName?: string): StaffUser {
+    const user = this.state.users.find((u) => u.id === userId);
+    if (!user || !user.active) {
+      throw new Error('الحساب غير متاح أو موقوف');
+    }
+    if (!this.sqlite.verifyUserPin(user.id, pin)) {
+      if (!user.security) user.security = {};
+      user.security.failedAttempts = (user.security.failedAttempts || 0) + 1;
+      this.recordLoginEvent({
+        userId: user.id,
+        deviceName: deviceName || user.deviceName,
+        method: 'بصمة / Face ID',
+        success: false,
+      });
+      this.persist();
+      throw new Error('رمز الدخول السريع (PIN) غير صحيح');
+    }
+    if (user.security) {
+      user.security.failedAttempts = 0;
+    }
+    user.statusState = 'متصل';
+    this.recordLoginEvent({
+      userId: user.id,
+      deviceName: deviceName || user.deviceName,
+      method: 'بصمة / Face ID',
+      success: true,
+    });
+    this.persist();
+    return user;
+  }
+
+  public updateUserCredentials(
+    actorUserId: string,
+    targetUserId: string,
+    input: { currentPassword?: string; newPassword?: string; newPin?: string },
+    deviceName?: string
+  ): void {
+    const actor = this.getActingUser(actorUserId);
+    const isSelf = actor.id === targetUserId;
+    if (!isSelf && actor.role !== 'sys_owner') {
+      throw new Error('تعديل بيانات دخول موظف آخر حصري لمالك النظام');
+    }
+    if (isSelf && input.newPassword && input.currentPassword !== undefined) {
+      if (!this.sqlite.verifyUserPassword(actor.id, input.currentPassword)) {
+        throw new Error('كلمة المرور الحالية غير صحيحة');
+      }
+    }
+    if (input.newPassword && input.newPassword.length < 6) {
+      throw new Error('كلمة المرور الجديدة يجب أن لا تقل عن 6 أحرف');
+    }
+    if (input.newPin && !/^\d{4,6}$/.test(input.newPin)) {
+      throw new Error('رمز الدخول السريع (PIN) يجب أن يتكون من 4 إلى 6 أرقام');
+    }
+    this.sqlite.updateUserCredentials(targetUserId, {
+      password: input.newPassword,
+      pin: input.newPin,
+    });
+    const target = this.state.users.find((u) => u.id === targetUserId);
+    if (target) {
+      target.security = {
+        ...(target.security || {}),
+        lastPasswordChangedAt: new Date().toISOString(),
+        tempPasswordSet: !isSelf,
+      };
+    }
+    this.addAudit(
+      actor,
+      'تحديث بيانات الأمان والدخول',
+      'StaffUser',
+      targetUserId,
+      isSelf ? 'تحديث كلمة المرور / رمز PIN الشخصي' : `إعادة تعيين بيانات الدخول للموظف ${target?.nameAr || targetUserId}`,
+      { deviceName }
+    );
+    this.persist();
+  }
+
+  public bumpEntityRevision(entityKey: string): number {
+    if (!this.state.entityRevisions) this.state.entityRevisions = {};
+    const next = (this.state.entityRevisions[entityKey] || 1) + 1;
+    this.state.entityRevisions[entityKey] = next;
+    return next;
   }
 
   private rebuildIndexes() {
@@ -161,162 +316,182 @@ export class AqarStore {
     }
   }
 
-  private loadFromDisk(): AqarDatabaseState {
+  private normalizeParsedState(parsed: Partial<AqarDatabaseState>, seed: AqarDatabaseState): AqarDatabaseState {
+    const mergeMissingById = <T extends { id: string }>(existing: T[] = [], seedItems: T[] = []): T[] => {
+      const seen = new Set(existing.map((x) => x.id));
+      return [...existing, ...seedItems.filter((item) => !seen.has(item.id))];
+    };
+    const parsedUsers = Array.isArray(parsed.users) ? parsed.users : seed.users;
+    const parsedProperties = Array.isArray(parsed.properties) ? parsed.properties : seed.properties;
+    const shouldSeedArchive = !parsed.archiveSeeded && parsedProperties.length > 0;
+    const shouldSeedTeam = !parsed.teamSeeded && parsedUsers.length > 0;
+    const mergedUsers: StaffUser[] = shouldSeedTeam
+      ? [
+          ...parsedUsers.map((u) => {
+            const seedMatch = seed.users.find((su) => su.id === u.id);
+            return {
+              ...seedMatch,
+              ...u,
+              statusState: u.statusState || seedMatch?.statusState || 'متصل',
+              specialty: u.specialty || seedMatch?.specialty,
+              managerRating: u.managerRating ?? seedMatch?.managerRating ?? 4.8,
+              lastActivitySummary: u.lastActivitySummary || seedMatch?.lastActivitySummary,
+              security: u.security || seedMatch?.security,
+              notificationPrefs: u.notificationPrefs || seedMatch?.notificationPrefs,
+            };
+          }),
+          ...seed.users.filter((su) => !parsedUsers.some((pu) => pu.id === su.id)),
+        ]
+      : parsedUsers;
+    const mergedRolePermissions: Record<RoleKey, PermissionKey[]> = {
+      ...DEFAULT_ROLE_PERMISSIONS,
+      ...(parsed.rolePermissions || {}),
+    };
+    return {
+      ...seed,
+      ...parsed,
+      users: mergedUsers,
+      rolePermissions: mergedRolePermissions,
+      properties: parsedProperties,
+      units: shouldSeedArchive ? mergeMissingById(parsed.units || [], seed.units) : parsed.units || seed.units,
+      payments: shouldSeedArchive ? mergeMissingById(parsed.payments || [], seed.payments) : parsed.payments || seed.payments,
+      tickets: shouldSeedArchive ? mergeMissingById(parsed.tickets || [], seed.tickets) : parsed.tickets || seed.tickets,
+      tasks: shouldSeedArchive ? mergeMissingById(parsed.tasks || [], seed.tasks) : parsed.tasks || seed.tasks,
+      documents: shouldSeedArchive ? mergeMissingById(parsed.documents || [], seed.documents) : parsed.documents || seed.documents,
+      savedArchiveFilters:
+        Array.isArray(parsed.savedArchiveFilters) && parsed.savedArchiveFilters.length > 0
+          ? parsed.savedArchiveFilters
+          : shouldSeedArchive
+          ? seed.savedArchiveFilters
+          : [],
+      archiveLastNightlyRun: parsed.archiveLastNightlyRun || seed.archiveLastNightlyRun,
+      archiveSeeded: parsed.archiveSeeded ?? true,
+      securityPolicy: parsed.securityPolicy || seed.securityPolicy,
+      loginHistory: Array.isArray(parsed.loginHistory) && parsed.loginHistory.length > 0 ? parsed.loginHistory : seed.loginHistory,
+      syncConflicts: Array.isArray(parsed.syncConflicts) && parsed.syncConflicts.length > 0 ? parsed.syncConflicts : seed.syncConflicts,
+      teamSeeded: parsed.teamSeeded ?? true,
+      settings: {
+        ...seed.settings,
+        ...(parsed.settings || {}),
+        currencyRatesToSar: {
+          ...seed.settings.currencyRatesToSar,
+          ...(parsed.settings?.currencyRatesToSar || {}),
+        } as Record<CurrencyCode, number>,
+        bankAccounts:
+          Array.isArray(parsed.settings?.bankAccounts) && parsed.settings.bankAccounts.length > 0
+            ? parsed.settings.bankAccounts
+            : seed.settings.bankAccounts,
+        receiptBranding: {
+          ...seed.settings.receiptBranding!,
+          ...(parsed.settings?.receiptBranding || {}),
+        },
+        generalPrefs: {
+          ...seed.settings.generalPrefs!,
+          ...(parsed.settings?.generalPrefs || {}),
+        },
+        securityCenter: {
+          ...seed.settings.securityCenter!,
+          ...(parsed.settings?.securityCenter || {}),
+        },
+        notificationsCenter: {
+          ...seed.settings.notificationsCenter!,
+          ...(parsed.settings?.notificationsCenter || {}),
+        },
+        printShare: {
+          ...seed.settings.printShare!,
+          ...(parsed.settings?.printShare || {}),
+        },
+        backupPolicy: {
+          ...seed.settings.backupPolicy!,
+          ...(parsed.settings?.backupPolicy || {}),
+        },
+        syncCenter: {
+          ...seed.settings.syncCenter!,
+          ...(parsed.settings?.syncCenter || {}),
+        },
+        developerCenter: {
+          ...seed.settings.developerCenter!,
+          ...(parsed.settings?.developerCenter || {}),
+        },
+      },
+      companies: Array.isArray(parsed.companies) && parsed.companies.length > 0 ? parsed.companies : seed.companies,
+      vendors: (parsed.vendors || seed.vendors).map((v) => {
+        const seedV = seed.vendors.find((sv) => sv.id === v.id);
+        return { ...seedV, ...v };
+      }),
+      tenants: (shouldSeedArchive ? mergeMissingById(parsed.tenants || [], seed.tenants) : parsed.tenants || seed.tenants).map((t) => {
+        const seedT = seed.tenants.find((st) => st.id === t.id);
+        return { ...seedT, ...t };
+      }),
+      contracts: (shouldSeedArchive ? mergeMissingById(parsed.contracts || [], seed.contracts) : parsed.contracts || seed.contracts).map((c) => {
+        const seedC = seed.contracts.find((sc) => sc.id === c.id);
+        return { ...seedC, ...c };
+      }),
+      leads: (parsed.leads || seed.leads).map((l) => {
+        const seedL = seed.leads.find((sl) => sl.id === l.id);
+        return { ...seedL, ...l };
+      }),
+      leadEscalations:
+        Array.isArray(parsed.leadEscalations) && parsed.leadEscalations.length > 0
+          ? parsed.leadEscalations
+          : seed.leadEscalations,
+      supplierInvoices:
+        Array.isArray(parsed.supplierInvoices) && parsed.supplierInvoices.length > 0
+          ? parsed.supplierInvoices
+          : seed.supplierInvoices,
+      recurringExpenses:
+        Array.isArray(parsed.recurringExpenses) && parsed.recurringExpenses.length > 0
+          ? parsed.recurringExpenses
+          : seed.recurringExpenses,
+      propertyBudgets:
+        Array.isArray(parsed.propertyBudgets) && parsed.propertyBudgets.length > 0
+          ? parsed.propertyBudgets
+          : seed.propertyBudgets,
+      purchaseOrders: Array.isArray(parsed.purchaseOrders) ? parsed.purchaseOrders : seed.purchaseOrders,
+      decisions: Array.isArray(parsed.decisions) ? parsed.decisions : seed.decisions,
+      reminderRules: Array.isArray(parsed.reminderRules) ? parsed.reminderRules : seed.reminderRules,
+      reminderLogs: Array.isArray(parsed.reminderLogs) ? parsed.reminderLogs : seed.reminderLogs,
+      communicationTemplates:
+        Array.isArray(parsed.communicationTemplates) && parsed.communicationTemplates.length > 0
+          ? parsed.communicationTemplates
+          : seed.communicationTemplates,
+      meterReadings:
+        Array.isArray(parsed.meterReadings) && parsed.meterReadings.length > 0
+          ? parsed.meterReadings
+          : seed.meterReadings,
+      scheduledReports: Array.isArray(parsed.scheduledReports) ? parsed.scheduledReports : [],
+      favoriteReports: Array.isArray(parsed.favoriteReports) ? parsed.favoriteReports : [],
+      sharedSearchFilters: Array.isArray(parsed.sharedSearchFilters) ? parsed.sharedSearchFilters : [],
+      zatcaInvoices: Array.isArray(parsed.zatcaInvoices) ? parsed.zatcaInvoices : [],
+      syncRevision: typeof parsed.syncRevision === 'number' ? parsed.syncRevision : 1,
+      entityRevisions: parsed.entityRevisions || {},
+    };
+  }
+
+  private loadInitialState(): AqarDatabaseState {
     const seed = createInitialSeed();
     try {
+      const fromSqlite = this.sqlite.loadState();
+      if (fromSqlite && Array.isArray(fromSqlite.properties) && Array.isArray(fromSqlite.users)) {
+        return this.normalizeParsedState(fromSqlite, seed);
+      }
+
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         const parsed = JSON.parse(raw) as AqarDatabaseState;
         if (parsed && Array.isArray(parsed.properties) && Array.isArray(parsed.users)) {
-          const mergeMissingById = <T extends { id: string }>(existing: T[] = [], seedItems: T[] = []): T[] => {
-            const seen = new Set(existing.map((x) => x.id));
-            return [...existing, ...seedItems.filter((item) => !seen.has(item.id))];
-          };
-          const shouldSeedArchive = !parsed.archiveSeeded && parsed.properties.length > 0;
-          const shouldSeedTeam = !parsed.teamSeeded && parsed.users.length > 0;
-          const mergedUsers: StaffUser[] = shouldSeedTeam
-            ? [
-                ...parsed.users.map((u) => {
-                  const seedMatch = seed.users.find((su) => su.id === u.id);
-                  return {
-                    ...seedMatch,
-                    ...u,
-                    statusState: u.statusState || seedMatch?.statusState || 'متصل',
-                    specialty: u.specialty || seedMatch?.specialty,
-                    managerRating: u.managerRating ?? seedMatch?.managerRating ?? 4.8,
-                    lastActivitySummary: u.lastActivitySummary || seedMatch?.lastActivitySummary,
-                    security: u.security || seedMatch?.security,
-                    notificationPrefs: u.notificationPrefs || seedMatch?.notificationPrefs,
-                  };
-                }),
-                ...seed.users.filter((su) => !parsed.users.some((pu) => pu.id === su.id)),
-              ]
-            : parsed.users;
-          const mergedRolePermissions: Record<RoleKey, PermissionKey[]> = {
-            ...DEFAULT_ROLE_PERMISSIONS,
-            ...(parsed.rolePermissions || {}),
-          };
-          return {
-            ...seed,
-            ...parsed,
-            users: mergedUsers,
-            rolePermissions: mergedRolePermissions,
-            units: shouldSeedArchive ? mergeMissingById(parsed.units, seed.units) : parsed.units,
-            payments: shouldSeedArchive ? mergeMissingById(parsed.payments, seed.payments) : parsed.payments,
-            tickets: shouldSeedArchive ? mergeMissingById(parsed.tickets, seed.tickets) : parsed.tickets,
-            tasks: shouldSeedArchive ? mergeMissingById(parsed.tasks, seed.tasks) : parsed.tasks,
-            documents: shouldSeedArchive ? mergeMissingById(parsed.documents, seed.documents) : parsed.documents,
-            savedArchiveFilters:
-              Array.isArray(parsed.savedArchiveFilters) && parsed.savedArchiveFilters.length > 0
-                ? parsed.savedArchiveFilters
-                : shouldSeedArchive
-                ? seed.savedArchiveFilters
-                : [],
-            archiveLastNightlyRun: parsed.archiveLastNightlyRun || seed.archiveLastNightlyRun,
-            archiveSeeded: parsed.archiveSeeded ?? true,
-            securityPolicy: parsed.securityPolicy || seed.securityPolicy,
-            loginHistory: Array.isArray(parsed.loginHistory) && parsed.loginHistory.length > 0 ? parsed.loginHistory : seed.loginHistory,
-            syncConflicts: Array.isArray(parsed.syncConflicts) && parsed.syncConflicts.length > 0 ? parsed.syncConflicts : seed.syncConflicts,
-            teamSeeded: parsed.teamSeeded ?? true,
-            settings: {
-              ...seed.settings,
-              ...(parsed.settings || {}),
-              currencyRatesToSar: {
-                ...seed.settings.currencyRatesToSar,
-                ...(parsed.settings?.currencyRatesToSar || {}),
-              } as Record<CurrencyCode, number>,
-              bankAccounts:
-                Array.isArray(parsed.settings?.bankAccounts) && parsed.settings.bankAccounts.length > 0
-                  ? parsed.settings.bankAccounts
-                  : seed.settings.bankAccounts,
-              receiptBranding: {
-                ...seed.settings.receiptBranding!,
-                ...(parsed.settings?.receiptBranding || {}),
-              },
-              generalPrefs: {
-                ...seed.settings.generalPrefs!,
-                ...(parsed.settings?.generalPrefs || {}),
-              },
-              securityCenter: {
-                ...seed.settings.securityCenter!,
-                ...(parsed.settings?.securityCenter || {}),
-              },
-              notificationsCenter: {
-                ...seed.settings.notificationsCenter!,
-                ...(parsed.settings?.notificationsCenter || {}),
-              },
-              printShare: {
-                ...seed.settings.printShare!,
-                ...(parsed.settings?.printShare || {}),
-              },
-              backupPolicy: {
-                ...seed.settings.backupPolicy!,
-                ...(parsed.settings?.backupPolicy || {}),
-              },
-              syncCenter: {
-                ...seed.settings.syncCenter!,
-                ...(parsed.settings?.syncCenter || {}),
-              },
-              developerCenter: {
-                ...seed.settings.developerCenter!,
-                ...(parsed.settings?.developerCenter || {}),
-              },
-            },
-            companies: Array.isArray(parsed.companies) && parsed.companies.length > 0 ? parsed.companies : seed.companies,
-            vendors: (parsed.vendors || seed.vendors).map((v) => {
-              const seedV = seed.vendors.find((sv) => sv.id === v.id);
-              return { ...seedV, ...v };
-            }),
-            tenants: (shouldSeedArchive ? mergeMissingById(parsed.tenants, seed.tenants) : parsed.tenants).map((t) => {
-              const seedT = seed.tenants.find((st) => st.id === t.id);
-              return { ...seedT, ...t };
-            }),
-            contracts: (shouldSeedArchive ? mergeMissingById(parsed.contracts, seed.contracts) : parsed.contracts).map((c) => {
-              const seedC = seed.contracts.find((sc) => sc.id === c.id);
-              return { ...seedC, ...c };
-            }),
-            leads: (parsed.leads || seed.leads).map((l) => {
-              const seedL = seed.leads.find((sl) => sl.id === l.id);
-              return { ...seedL, ...l };
-            }),
-            leadEscalations:
-              Array.isArray(parsed.leadEscalations) && parsed.leadEscalations.length > 0
-                ? parsed.leadEscalations
-                : seed.leadEscalations,
-            supplierInvoices:
-              Array.isArray(parsed.supplierInvoices) && parsed.supplierInvoices.length > 0
-                ? parsed.supplierInvoices
-                : seed.supplierInvoices,
-            recurringExpenses:
-              Array.isArray(parsed.recurringExpenses) && parsed.recurringExpenses.length > 0
-                ? parsed.recurringExpenses
-                : seed.recurringExpenses,
-            propertyBudgets:
-              Array.isArray(parsed.propertyBudgets) && parsed.propertyBudgets.length > 0
-                ? parsed.propertyBudgets
-                : seed.propertyBudgets,
-            purchaseOrders: Array.isArray(parsed.purchaseOrders) ? parsed.purchaseOrders : seed.purchaseOrders,
-            decisions: Array.isArray(parsed.decisions) ? parsed.decisions : seed.decisions,
-            reminderRules: Array.isArray(parsed.reminderRules) ? parsed.reminderRules : seed.reminderRules,
-            reminderLogs: Array.isArray(parsed.reminderLogs) ? parsed.reminderLogs : seed.reminderLogs,
-            communicationTemplates:
-              Array.isArray(parsed.communicationTemplates) && parsed.communicationTemplates.length > 0
-                ? parsed.communicationTemplates
-                : seed.communicationTemplates,
-            meterReadings:
-              Array.isArray(parsed.meterReadings) && parsed.meterReadings.length > 0
-                ? parsed.meterReadings
-                : seed.meterReadings,
-            scheduledReports: Array.isArray(parsed.scheduledReports) ? parsed.scheduledReports : [],
-            favoriteReports: Array.isArray(parsed.favoriteReports) ? parsed.favoriteReports : [],
-            sharedSearchFilters: Array.isArray(parsed.sharedSearchFilters) ? parsed.sharedSearchFilters : [],
-            zatcaInvoices: Array.isArray(parsed.zatcaInvoices) ? parsed.zatcaInvoices : [],
-            syncRevision: typeof parsed.syncRevision === 'number' ? parsed.syncRevision : 1,
-          };
+          const normalized = this.normalizeParsedState(parsed, seed);
+          this.sqlite.saveState(normalized);
+          try {
+            fs.copyFileSync(DB_FILE, `${DB_FILE}.migrated.bak`);
+          } catch {
+            // ignore backup failure during migration
+          }
+          return normalized;
         }
       }
     } catch (err) {
-      console.error('Failed to load DB file, resetting to seed:', err);
+      console.error('Failed to load SQLite/JSON DB, initializing seed:', err);
     }
     this.persist(seed);
     return seed;
@@ -326,9 +501,7 @@ export class AqarStore {
     ensureDirs();
     nextState.syncRevision = (nextState.syncRevision || 0) + 1;
     nextState.lastUpdatedAt = new Date().toISOString();
-    const tmpFile = `${DB_FILE}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify(nextState, null, 2), 'utf-8');
-    fs.renameSync(tmpFile, DB_FILE);
+    this.sqlite.saveState(nextState);
     if (nextState === this.state) {
       this.rebuildIndexes();
     }
@@ -338,10 +511,43 @@ export class AqarStore {
     return this.state;
   }
 
+  private sanitizeUsersForActor(actor: StaffUser): StaffUser[] {
+    const canManageUsers = this.userHasPermission(actor, 'manage_users');
+    if (canManageUsers) {
+      return this.state.users;
+    }
+    return this.state.users.map((u) => ({
+      id: u.id,
+      nameAr: u.nameAr,
+      nameEn: u.nameEn,
+      role: u.role,
+      roleLabelAr: u.roleLabelAr,
+      roleLabelEn: u.roleLabelEn,
+      email: u.id === actor.id ? u.email : '',
+      phone: u.id === actor.id ? u.phone : '',
+      approvalLimitSar: u.id === actor.id ? u.approvalLimitSar : 0,
+      active: u.active,
+      ownerId: u.id === actor.id ? u.ownerId : undefined,
+      deviceName: u.id === actor.id ? u.deviceName : '',
+      lastActiveAt: u.lastActiveAt,
+      statusState: u.statusState,
+      specialty: u.specialty,
+      notificationPrefs: u.id === actor.id ? u.notificationPrefs : undefined,
+    }));
+  }
+
   public getStateForUser(userId?: string): AqarDatabaseState {
-    if (!userId) return this.state;
-    const user = this.state.users.find((u) => u.id === userId);
-    if (!user) return this.state;
+    if (!userId) {
+      throw new Error('يجب تسجيل الدخول للوصول إلى البيانات');
+    }
+    const user = this.state.users.find((u) => u.id === userId && u.active);
+    if (!user) {
+      throw new Error('المستخدم غير مصرح له أو موقوف');
+    }
+
+    const canViewAudit = this.userHasPermission(user, 'view_audit');
+    const canBackup = this.userHasPermission(user, 'backup_restore');
+    const sanitizedUsers = this.sanitizeUsersForActor(user);
 
     // Property-level isolation for staff members when allowedPropertyIds is restricted
     if (user.role !== 'owner' && user.role !== 'gm' && user.role !== 'sys_owner') {
@@ -350,11 +556,22 @@ export class AqarStore {
         const propSet = new Set(allowedProps);
         const unitSet = new Set(this.state.units.filter((u) => propSet.has(u.propertyId)).map((u) => u.id));
         const ctrSet = new Set(this.state.contracts.filter((c) => propSet.has(c.propertyId)).map((c) => c.id));
+        const tenantSet = new Set(
+          this.state.contracts.filter((c) => propSet.has(c.propertyId)).map((c) => c.tenantId)
+        );
         return {
           ...this.state,
+          users: sanitizedUsers,
+          auditLogs: canViewAudit
+            ? this.state.auditLogs.filter((a) => !a.propertyId || propSet.has(a.propertyId))
+            : [],
+          loginHistory: canViewAudit ? this.state.loginHistory : [],
+          backups: canBackup ? this.state.backups : [],
           properties: this.state.properties.filter((p) => propSet.has(p.id)),
           units: this.state.units.filter((u) => unitSet.has(u.id)),
+          tenants: this.state.tenants.filter((t) => tenantSet.has(t.id)),
           contracts: this.state.contracts.filter((c) => ctrSet.has(c.id)),
+          handovers: this.state.handovers.filter((h) => propSet.has(h.propertyId)),
           installments: this.state.installments.filter((i) => propSet.has(i.propertyId)),
           payments: this.state.payments.filter((p) => propSet.has(p.propertyId)),
           expenses: this.state.expenses.filter((e) => propSet.has(e.propertyId)),
@@ -365,13 +582,33 @@ export class AqarStore {
           leads: this.state.leads.filter((l) => propSet.has(l.propertyId)),
           leadEscalations: (this.state.leadEscalations || []).filter((le) => propSet.has(le.propertyId)),
           meterReadings: (this.state.meterReadings || []).filter((mr) => propSet.has(mr.propertyId)),
+          documents: this.state.documents.filter(
+            (d) =>
+              d.relatedType === 'شركة' ||
+              (d.relatedType === 'عقار' && propSet.has(d.relatedId)) ||
+              (d.relatedType === 'وحدة' && unitSet.has(d.relatedId)) ||
+              (d.relatedType === 'عقد' && ctrSet.has(d.relatedId)) ||
+              (d.relatedType === 'مستأجر' && tenantSet.has(d.relatedId))
+          ),
         };
       }
-      return this.state;
+      return {
+        ...this.state,
+        users: sanitizedUsers,
+        auditLogs: canViewAudit ? this.state.auditLogs : [],
+        loginHistory: canViewAudit ? this.state.loginHistory : [],
+        backups: canBackup ? this.state.backups : [],
+      };
     }
 
     if (user.role !== 'owner' || !user.ownerId) {
-      return this.state;
+      return {
+        ...this.state,
+        users: sanitizedUsers,
+        auditLogs: canViewAudit ? this.state.auditLogs : [],
+        loginHistory: canViewAudit ? this.state.loginHistory : [],
+        backups: canBackup ? this.state.backups : [],
+      };
     }
     // Owner isolation: owner can ONLY see properties they own and related records
     const ownedPropIds = new Set(
@@ -385,12 +622,17 @@ export class AqarStore {
     const ownedContractIds = new Set(
       this.state.contracts.filter((c) => ownedPropIds.has(c.propertyId)).map((c) => c.id)
     );
+    const ownedTenantIds = new Set(
+      this.state.contracts.filter((c) => ownedPropIds.has(c.propertyId)).map((c) => c.tenantId)
+    );
 
     return {
       ...this.state,
+      users: sanitizedUsers,
       properties: this.state.properties.filter((p) => ownedPropIds.has(p.id)),
       units: this.state.units.filter((u) => ownedUnitIds.has(u.id)),
       contracts: this.state.contracts.filter((c) => ownedContractIds.has(c.id)),
+      handovers: this.state.handovers.filter((h) => ownedPropIds.has(h.propertyId)),
       installments: this.state.installments.filter((i) => ownedPropIds.has(i.propertyId)),
       payments: this.state.payments.filter((p) => ownedPropIds.has(p.propertyId)),
       expenses: this.state.expenses.filter((e) => ownedPropIds.has(e.propertyId) && e.approvalStatus === 'معتمد'),
@@ -401,10 +643,17 @@ export class AqarStore {
       leadEscalations: (this.state.leadEscalations || []).filter((le) => ownedPropIds.has(le.propertyId)),
       meterReadings: (this.state.meterReadings || []).filter((mr) => ownedPropIds.has(mr.propertyId)),
       owners: this.state.owners.filter((o) => o.id === user.ownerId),
-      tenants: this.state.tenants.filter((t) =>
-        this.state.contracts.some((c) => ownedPropIds.has(c.propertyId) && c.tenantId === t.id)
+      tenants: this.state.tenants.filter((t) => ownedTenantIds.has(t.id)),
+      documents: this.state.documents.filter(
+        (d) =>
+          (d.relatedType === 'عقار' && ownedPropIds.has(d.relatedId)) ||
+          (d.relatedType === 'وحدة' && ownedUnitIds.has(d.relatedId)) ||
+          (d.relatedType === 'عقد' && ownedContractIds.has(d.relatedId)) ||
+          (d.relatedType === 'مستأجر' && ownedTenantIds.has(d.relatedId))
       ),
       auditLogs: [],
+      loginHistory: [],
+      backups: [],
     };
   }
 
@@ -2030,18 +2279,29 @@ export class AqarStore {
     this.persist();
   }
 
-  public createBackup(userId: string, label?: string, deviceName?: string): BackupSnapshot {
+  public createBackup(
+    userId: string,
+    label?: string,
+    deviceName?: string,
+    encryptPassword?: string
+  ): BackupSnapshot {
     const user = this.assertPermission(userId, 'backup_restore');
     ensureDirs();
     const id = uid('bkp');
     const json = JSON.stringify(this.state, null, 2);
-    const defaultPath = path.join(BACKUP_DIR, `${id}.json`);
-    fs.writeFileSync(defaultPath, json, 'utf-8');
+    const shouldEncrypt = Boolean(this.state.settings.backupPolicy?.encryptBackups || encryptPassword?.trim());
+    const ext = shouldEncrypt ? '.enc.json' : '.json';
+    const payloadToWrite = shouldEncrypt
+      ? encryptBackupPayload(json, encryptPassword?.trim() || 'AqarBackup@2026')
+      : json;
+
+    const defaultPath = path.join(BACKUP_DIR, `${id}${ext}`);
+    fs.writeFileSync(defaultPath, payloadToWrite, 'utf-8');
     const targetDir = this.getBackupsDir();
     if (targetDir !== BACKUP_DIR) {
       try {
         fs.mkdirSync(targetDir, { recursive: true });
-        fs.writeFileSync(path.join(targetDir, `${id}.json`), json, 'utf-8');
+        fs.writeFileSync(path.join(targetDir, `${id}${ext}`), payloadToWrite, 'utf-8');
       } catch {
         // Keep local backup even if external/NAS target is unreachable
       }
@@ -2058,16 +2318,22 @@ export class AqarStore {
 
     const snap: BackupSnapshot = {
       id,
-      label: label || `نسخة احتياطية يدوية · ${new Date().toLocaleDateString('ar-SA')}`,
+      label: label || `نسخة احتياطية ${shouldEncrypt ? 'مشفرة ' : 'يدوية '}· ${new Date().toLocaleDateString('ar-SA')}`,
       createdAt: new Date().toISOString(),
       createdBy: user.nameAr,
       recordCount,
-      sizeKb: Math.max(1, Math.round(Buffer.byteLength(json, 'utf-8') / 1024)),
+      sizeKb: Math.max(1, Math.round(Buffer.byteLength(payloadToWrite, 'utf-8') / 1024)),
+      encrypted: shouldEncrypt,
     };
     this.state.backups.unshift(snap);
-    this.addAudit(user, 'إنشاء نسخة احتياطية مشفرة', 'Backup', snap.id, `حفظ نسخة احتياطية (${snap.sizeKb} KB)`, {
-      deviceName,
-    });
+    this.addAudit(
+      user,
+      shouldEncrypt ? 'إنشاء نسخة احتياطية مشفرة AES-256' : 'إنشاء نسخة احتياطية',
+      'Backup',
+      snap.id,
+      `حفظ نسخة احتياطية (${snap.sizeKb} KB${shouldEncrypt ? ' · AES-256-GCM' : ''})`,
+      { deviceName }
+    );
     this.persist();
     return snap;
   }
@@ -2076,7 +2342,8 @@ export class AqarStore {
     userId: string,
     backupId: string,
     deviceName?: string,
-    mode: 'replace' | 'merge' = 'replace'
+    mode: 'replace' | 'merge' = 'replace',
+    password?: string
   ): AqarDatabaseState {
     const user = this.assertPermission(userId, 'backup_restore');
     const filePath = this.resolveBackupFile(backupId);
@@ -2084,7 +2351,16 @@ export class AqarStore {
       throw new Error('ملف النسخة الاحتياطية غير موجود على الخادم (جرب إنشاء نسخة جديدة أولاً)');
     }
     const raw = fs.readFileSync(filePath, 'utf-8');
-    const restored = JSON.parse(raw) as AqarDatabaseState;
+    const decryptedRaw = isEncryptedBackupEnvelope(raw) ? decryptBackupPayload(raw, password) : raw;
+    const restored = JSON.parse(decryptedRaw) as AqarDatabaseState;
+
+    // Create automatic safety snapshot before destructive replace/merge
+    try {
+      this.createBackup(userId, `نسخة أمان تلقائية قبل الاستعادة (${backupId})`, deviceName);
+    } catch {
+      // Do not block restore if safety snapshot fails
+    }
+
     const currentBackups = this.state.backups;
 
     if (mode === 'merge') {
@@ -2104,6 +2380,24 @@ export class AqarStore {
       this.state.documents = mergeArrays(this.state.documents, restored.documents);
       this.state.vendors = mergeArrays(this.state.vendors, restored.vendors);
       this.state.owners = mergeArrays(this.state.owners, restored.owners);
+      this.state.accounts = mergeArrays(this.state.accounts, restored.accounts);
+      this.state.journals = mergeArrays(this.state.journals, restored.journals);
+      this.state.communicationTemplates = mergeArrays(
+        this.state.communicationTemplates || [],
+        restored.communicationTemplates || []
+      );
+      this.state.reminderRules = mergeArrays(this.state.reminderRules || [], restored.reminderRules || []);
+      this.state.zatcaInvoices = mergeArrays(this.state.zatcaInvoices || [], restored.zatcaInvoices || []);
+      this.state.meterReadings = mergeArrays(this.state.meterReadings || [], restored.meterReadings || []);
+      if (restored.counters) {
+        this.state.counters = {
+          receipt: Math.max(this.state.counters.receipt, restored.counters.receipt || 0),
+          contract: Math.max(this.state.counters.contract, restored.counters.contract || 0),
+          ticket: Math.max(this.state.counters.ticket, restored.counters.ticket || 0),
+          expense: Math.max(this.state.counters.expense, restored.counters.expense || 0),
+          journal: Math.max(this.state.counters.journal, restored.counters.journal || 0),
+        };
+      }
       this.addAudit(
         user,
         'دمج ذكي من نسخة احتياطية',
@@ -2115,6 +2409,7 @@ export class AqarStore {
     } else {
       this.state = restored;
       this.state.backups = currentBackups;
+      this.sqlite.ensureSeedCredentials(this.state.users);
       this.addAudit(
         user,
         'استعادة نسخة احتياطية (استبدال كامل)',
@@ -3695,6 +3990,10 @@ export class AqarStore {
       },
     };
     this.state.users.push(newUser);
+    this.sqlite.updateUserCredentials(newUser.id, {
+      password: (input as { tempPassword?: string }).tempPassword || 'Aqar@2026',
+      pin: '1234',
+    });
     this.addAudit(
       actor,
       'إضافة موظف جديد',
@@ -4054,17 +4353,25 @@ export class AqarStore {
     return count;
   }
 
-  public previewBackup(backupId: string): {
-    id: string;
-    exists: boolean;
-    propertiesCount: number;
-    unitsCount: number;
-    tenantsCount: number;
-    contractsCount: number;
-    paymentsCount: number;
-    templatesCount: number;
-    lastUpdatedAt?: string;
-  } {
+  private diffCollection<T extends { id: string }>(current: T[] = [], incoming: T[] = []): BackupCollectionDiff {
+    const curMap = new Map(current.map((item) => [item.id, JSON.stringify(item)]));
+    let added = 0;
+    let updated = 0;
+    let unchanged = 0;
+    for (const item of incoming) {
+      const existing = curMap.get(item.id);
+      if (existing === undefined) {
+        added += 1;
+      } else if (existing !== JSON.stringify(item)) {
+        updated += 1;
+      } else {
+        unchanged += 1;
+      }
+    }
+    return { added, updated, unchanged };
+  }
+
+  public previewBackup(backupId: string, password?: string): BackupPreviewResult {
     const filePath = this.resolveBackupFile(backupId);
     if (!filePath) {
       return {
@@ -4078,10 +4385,60 @@ export class AqarStore {
         templatesCount: 0,
       };
     }
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as AqarDatabaseState;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const encrypted = isEncryptedBackupEnvelope(raw);
+    let decryptedRaw = raw;
+    if (encrypted) {
+      if (!password?.trim()) {
+        return {
+          id: backupId,
+          exists: true,
+          encrypted: true,
+          requiresPassword: true,
+          propertiesCount: 0,
+          unitsCount: 0,
+          tenantsCount: 0,
+          contractsCount: 0,
+          paymentsCount: 0,
+          templatesCount: 0,
+        };
+      }
+      try {
+        decryptedRaw = decryptBackupPayload(raw, password);
+      } catch (err) {
+        return {
+          id: backupId,
+          exists: true,
+          encrypted: true,
+          requiresPassword: true,
+          decryptionError: (err as Error).message,
+          propertiesCount: 0,
+          unitsCount: 0,
+          tenantsCount: 0,
+          contractsCount: 0,
+          paymentsCount: 0,
+          templatesCount: 0,
+        };
+      }
+    }
+
+    const parsed = JSON.parse(decryptedRaw) as AqarDatabaseState;
+    const diff = {
+      properties: this.diffCollection(this.state.properties, parsed.properties || []),
+      units: this.diffCollection(this.state.units, parsed.units || []),
+      tenants: this.diffCollection(this.state.tenants, parsed.tenants || []),
+      contracts: this.diffCollection(this.state.contracts, parsed.contracts || []),
+      payments: this.diffCollection(this.state.payments, parsed.payments || []),
+      expenses: this.diffCollection(this.state.expenses, parsed.expenses || []),
+      tickets: this.diffCollection(this.state.tickets, parsed.tickets || []),
+    };
+    const totalChanged = Object.values(diff).reduce((s, d) => s + d.added + d.updated, 0);
+
     return {
       id: backupId,
       exists: true,
+      encrypted,
+      requiresPassword: false,
       propertiesCount: parsed.properties?.length || 0,
       unitsCount: parsed.units?.length || 0,
       tenantsCount: parsed.tenants?.length || 0,
@@ -4089,6 +4446,7 @@ export class AqarStore {
       paymentsCount: parsed.payments?.length || 0,
       templatesCount: parsed.communicationTemplates?.length || 0,
       lastUpdatedAt: parsed.lastUpdatedAt,
+      diff: { ...diff, totalChanged },
     };
   }
 
@@ -5193,37 +5551,64 @@ export class AqarStore {
   public evaluateSyncOperationConflict(
     userId: string,
     op: {
+      operationId?: string;
       idempotencyKey: string;
-      method: 'POST' | 'PATCH';
+      method: 'POST' | 'PATCH' | 'DELETE';
       endpoint: string;
+      entityType?: string;
+      entityId?: string;
+      baseRevision?: number;
       descriptionAr: string;
       queuedAt: string;
       deviceName?: string;
     },
     clientLastUpdatedAt?: string
-  ): { skipDuplicate: boolean; conflict?: SyncConflictRecord } {
-    if (this.idempotencyIndex.has(op.idempotencyKey)) {
-      return { skipDuplicate: true };
+  ): { skipDuplicate: boolean; cachedResult?: unknown; conflict?: SyncConflictRecord } {
+    const opKey = op.operationId || op.idempotencyKey;
+    const existingOp = this.sqlite.hasOperation(opKey);
+    if (existingOp || this.idempotencyIndex.has(op.idempotencyKey)) {
+      let cachedResult: unknown;
+      if (existingOp?.resultJson) {
+        try {
+          cachedResult = JSON.parse(existingOp.resultJson);
+        } catch {
+          cachedResult = undefined;
+        }
+      }
+      return { skipDuplicate: true, cachedResult };
     }
-    const isPatch = op.method === 'PATCH';
-    const hasConcurrentUpdate = Boolean(clientLastUpdatedAt && this.state.lastUpdatedAt > clientLastUpdatedAt);
-    if (isPatch && hasConcurrentUpdate) {
+
+    const isMutationOnExisting = op.method === 'PATCH' || op.method === 'DELETE';
+    const entityKey =
+      op.entityType && op.entityId ? `${op.entityType}:${op.entityId}` : undefined;
+    const serverEntityRev = entityKey ? this.state.entityRevisions?.[entityKey] || 1 : undefined;
+    const revisionMismatch =
+      isMutationOnExisting &&
+      typeof op.baseRevision === 'number' &&
+      typeof serverEntityRev === 'number' &&
+      serverEntityRev > op.baseRevision;
+    const timestampMismatch =
+      isMutationOnExisting &&
+      typeof op.baseRevision !== 'number' &&
+      Boolean(clientLastUpdatedAt && this.state.lastUpdatedAt > clientLastUpdatedAt);
+
+    if (revisionMismatch || timestampMismatch) {
       const user = this.state.users.find((u) => u.id === userId);
       const policy = this.state.settings.syncCenter?.conflictResolution || 'latest_wins';
       const status: SyncConflictRecord['status'] =
         policy === 'manual_review'
           ? 'بانتظار مراجعة المدير'
-          : policy === 'current_device'
-          ? 'تم اعتماد التعديل الأحدث'
           : 'تم اعتماد التعديل الأحدث';
       const conflict: SyncConflictRecord = {
         id: uid('cnf'),
-        entityType: 'SyncBatch',
-        entityId: op.endpoint,
+        entityType: op.entityType || 'SyncBatch',
+        entityId: op.entityId || op.endpoint,
         entityLabel: op.descriptionAr || op.endpoint,
         firstActorName: 'الخادم المركزي (تعديل متزامن)',
         secondActorName: `${user?.nameAr || userId} (${op.deviceName || 'جهاز طرفي'})`,
-        firstChangeSummary: `تعديل سابق على الخادم بتاريخ ${this.state.lastUpdatedAt.slice(0, 16).replace('T', ' ')}`,
+        firstChangeSummary: revisionMismatch
+          ? `نسخة الخادم الحالية رقم ${serverEntityRev} مقابل نسخة العميل ${op.baseRevision}`
+          : `تعديل سابق على الخادم بتاريخ ${this.state.lastUpdatedAt.slice(0, 16).replace('T', ' ')}`,
         secondChangeSummary: `مزامنة من وضع عدم الاتصال (${op.descriptionAr})`,
         status,
         resolvedBy: status === 'بانتظار مراجعة المدير' ? undefined : 'محرك المزامنة التلقائي',
@@ -5236,6 +5621,39 @@ export class AqarStore {
       return { skipDuplicate: false, conflict };
     }
     return { skipDuplicate: false };
+  }
+
+  public recordSyncOperationResult(
+    operationId: string,
+    userId: string,
+    method: string,
+    endpoint: string,
+    result: unknown,
+    entityType?: string,
+    entityId?: string
+  ) {
+    if (!operationId) return;
+    if (!this.state.processedIdempotencyKeys.includes(operationId)) {
+      this.state.processedIdempotencyKeys.push(operationId);
+      if (this.state.processedIdempotencyKeys.length > 2000) {
+        this.state.processedIdempotencyKeys = this.state.processedIdempotencyKeys.slice(-2000);
+      }
+    }
+    this.idempotencyIndex.add(operationId);
+    if (entityType && entityId) {
+      this.bumpEntityRevision(`${entityType}:${entityId}`);
+    }
+    this.sqlite.recordOperation({
+      operationId,
+      userId,
+      method,
+      endpoint,
+      entityType,
+      entityId,
+      resultJson: JSON.stringify(result),
+      status: 'completed',
+      createdAt: new Date().toISOString(),
+    });
   }
 
   // 21. Advanced Report Builder — Scheduled Reports
@@ -5539,10 +5957,15 @@ export class AqarStore {
   }
 
   private resolveBackupFile(backupId: string): string | null {
-    const customCandidate = path.join(this.getBackupsDir(), `${backupId}.json`);
-    if (fs.existsSync(customCandidate)) return customCandidate;
-    const defaultCandidate = path.join(BACKUP_DIR, `${backupId}.json`);
-    if (fs.existsSync(defaultCandidate)) return defaultCandidate;
+    const candidates = [
+      path.join(this.getBackupsDir(), `${backupId}.enc.json`),
+      path.join(this.getBackupsDir(), `${backupId}.json`),
+      path.join(BACKUP_DIR, `${backupId}.enc.json`),
+      path.join(BACKUP_DIR, `${backupId}.json`),
+    ];
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
     return null;
   }
 
@@ -5632,6 +6055,7 @@ export class AqarStore {
       archiveFilesCount: countFiles(archiveDir),
       documentsFilesCount: countFiles(documentsDir),
       platform: process.platform,
+      sqlite: this.sqlite.getDiagnostics(),
     };
   }
 

@@ -333,7 +333,7 @@ export function ReportsCenterView() {
   const exportBrandedReportPdf = (title: string, headers: string[], rows: (string | number)[][]) => {
     triggerHaptic('light');
     const esc = (v: unknown) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const logoSrc = state.settings.logoDataUrl || '/assets/aistudio/Aqar_plus_8de53ba4.svg';
+    const logoSrc = state.settings.logoDataUrl || './assets/aistudio/Aqar_plus_8de53ba4.svg';
     const ths = headers.map((h) => `<th>${esc(h)}</th>`).join('');
     const trs = rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('');
 

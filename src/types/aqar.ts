@@ -1111,6 +1111,63 @@ export interface BackupSnapshot {
   createdBy: string;
   recordCount: number;
   sizeKb: number;
+  encrypted?: boolean;
+}
+
+export interface BackupCollectionDiff {
+  added: number;
+  updated: number;
+  unchanged: number;
+}
+
+export interface BackupPreviewResult {
+  id: string;
+  exists: boolean;
+  encrypted?: boolean;
+  requiresPassword?: boolean;
+  decryptionError?: string;
+  propertiesCount: number;
+  unitsCount: number;
+  tenantsCount: number;
+  contractsCount: number;
+  paymentsCount: number;
+  templatesCount: number;
+  lastUpdatedAt?: string;
+  diff?: {
+    properties: BackupCollectionDiff;
+    units: BackupCollectionDiff;
+    tenants: BackupCollectionDiff;
+    contracts: BackupCollectionDiff;
+    payments: BackupCollectionDiff;
+    expenses: BackupCollectionDiff;
+    tickets: BackupCollectionDiff;
+    totalChanged: number;
+  };
+}
+
+export interface LoginProfileSummary {
+  id: string;
+  nameAr: string;
+  nameEn: string;
+  email: string;
+  role: RoleKey;
+  roleLabelAr: string;
+  roleLabelEn: string;
+  hasPin: boolean;
+}
+
+export interface AuthSessionInfo {
+  authenticated: boolean;
+  user?: StaffUser;
+  token?: string;
+  expiresAt?: string;
+  demoLoginEnabled?: boolean;
+  loginProfiles?: LoginProfileSummary[];
+  companyBranding?: {
+    nameAr: string;
+    nameEn: string;
+    logoDataUrl?: string;
+  };
 }
 
 export type ReminderChannel = 'بريد إلكتروني' | 'رسائل نصية SMS (محاكاة)' | 'واتساب';
@@ -1594,18 +1651,24 @@ export interface AqarDatabaseState {
   communicationTemplates?: CommunicationTemplate[];
   teamSeeded?: boolean;
   syncRevision?: number;
+  entityRevisions?: Record<string, number>;
   lastUpdatedAt: string;
 }
 
 export interface OfflineQueuedAction {
   id: string;
+  operationId: string;
   idempotencyKey: string;
-  method: 'POST' | 'PATCH';
+  method: 'POST' | 'PATCH' | 'DELETE';
   endpoint: string;
   body: unknown;
+  entityType?: string;
+  entityId?: string;
+  baseRevision?: number;
   descriptionAr: string;
   descriptionEn: string;
   queuedAt: string;
   userId: string;
   deviceName: string;
+  deviceId?: string;
 }

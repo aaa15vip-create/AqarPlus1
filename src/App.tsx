@@ -20,11 +20,17 @@ import { CommunicationTemplatesView } from './components/CommunicationTemplatesV
 import { OnboardingJourney } from './components/OnboardingJourney';
 import { TeamWorkforceView } from './components/TeamWorkforceView';
 import { PublicProspectViews } from './components/PublicProspectViews';
+import { AuthLoginScreen } from './components/AuthLoginScreen';
+import { PwaInstallBanner } from './components/PwaInstallBanner';
 
 function AqarWorkspace() {
-  const { loading, state, activeNav, lang, onboardingConfig, closeOnboarding } = useAqar();
+  const { authChecking, isAuthenticated, loading, state, activeNav, lang, onboardingConfig, closeOnboarding } = useAqar();
 
-  if (loading || !state) {
+  if (!authChecking && !isAuthenticated) {
+    return <AuthLoginScreen />;
+  }
+
+  if (authChecking || loading || !state) {
     return (
       <div className="min-h-screen flex bg-slate-50 dark:bg-[#0A0E1A] text-slate-900 dark:text-slate-100">
         {/* Sidebar Skeleton */}
@@ -145,6 +151,7 @@ function AqarWorkspace() {
           onComplete={closeOnboarding}
         />
       )}
+      <PwaInstallBanner />
     </>
   );
 }

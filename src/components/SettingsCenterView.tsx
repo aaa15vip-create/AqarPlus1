@@ -358,6 +358,9 @@ interface BackupPreviewData {
   id: string;
   label: string;
   exists: boolean;
+  encrypted?: boolean;
+  requiresPassword?: boolean;
+  decryptionError?: string;
   propertiesCount: number;
   unitsCount: number;
   tenantsCount: number;
@@ -365,6 +368,16 @@ interface BackupPreviewData {
   paymentsCount: number;
   templatesCount: number;
   lastUpdatedAt?: string;
+  diff?: {
+    properties: { added: number; updated: number; unchanged: number };
+    units: { added: number; updated: number; unchanged: number };
+    tenants: { added: number; updated: number; unchanged: number };
+    contracts: { added: number; updated: number; unchanged: number };
+    payments: { added: number; updated: number; unchanged: number };
+    expenses: { added: number; updated: number; unchanged: number };
+    tickets: { added: number; updated: number; unchanged: number };
+    totalChanged: number;
+  };
 }
 
 export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?: SettingsSectionId }) {
@@ -382,6 +395,8 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
     setLang,
     activeNav,
     setActiveNav,
+    apiFetch,
+    changeCredentials,
   } = useAqar();
 
   const isAr = lang === 'ar';
@@ -557,6 +572,7 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
   const [customPrinterAddress, setCustomPrinterAddress] = useState('');
 
   const [backupEncryptPassword, setBackupEncryptPassword] = useState('');
+  const [backupRestorePassword, setBackupRestorePassword] = useState('');
   const [backupPreview, setBackupPreview] = useState<BackupPreviewData | null>(null);
   const [restoreMode, setRestoreMode] = useState<'replace' | 'merge'>('replace');
 
@@ -566,7 +582,7 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
 
   const loadStorageStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/storage/status');
+      const res = await apiFetch('/api/storage/status');
       const ct = res.headers.get('content-type') || '';
       if (res.ok && ct.includes('application/json')) {
         const data = (await res.json()) as StorageStatusData;
@@ -575,7 +591,7 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
     } catch {
       // ignore transient network errors or static hosting
     }
-  }, []);
+  }, [apiFetch]);
 
   useEffect(() => {
     if (activeSection === 'backup') {
@@ -818,11 +834,21 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
     await savePartialSettings({ printShare: nextPrintShare }, isAr ? 'تمت إضافة الطابعة الشبكية وحفظها' : 'Network printer added');
   };
 
-  const handlePreviewBackup = async (backupId: string, label: string) => {
+  const handlePreviewBackup = async (backupId: string, label: string, overridePassword?: string) => {
     triggerHaptic('light');
+    const pwdToUse = overridePassword !== undefined ? overridePassword : backupEncryptPassword;
     try {
-      const res = await fetch(`/api/backups/${backupId}/preview`);
+      const res = await apiFetch(`/api/backups/${backupId}/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pwdToUse || undefined }),
+      });
       const data = await res.json();
+      if (!res.ok) {
+        pushToast('error', data?.error || (isAr ? 'تعذر معاينة النسخة الاحتياطية' : 'Backup preview failed'));
+        return;
+      }
+      if (pwdToUse) setBackupRestorePassword(pwdToUse);
       setBackupPreview({ ...data, label });
     } catch {
       pushToast('error', isAr ? 'تعذر معاينة النسخة الاحتياطية' : 'Backup preview failed');
@@ -832,20 +858,24 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
   const handleConfirmRestoreBackup = async () => {
     if (!backupPreview) return;
     triggerHaptic('warning');
-    const res = await mutate('POST', `/api/backups/${backupPreview.id}/restore`, { mode: restoreMode });
+    const res = await mutate('POST', `/api/backups/${backupPreview.id}/restore`, {
+      mode: restoreMode,
+      password: backupRestorePassword || backupEncryptPassword || undefined,
+    });
     if (res) {
       triggerHaptic('success');
       pushToast(
         'success',
         restoreMode === 'merge'
           ? isAr
-            ? 'تم دمج السجلات غير المكررة من النسخة الاحتياطية بنجاح'
+            ? 'تم دمج السجلات غير المكررة من النسخة الاحتياطية مع إنشاء نسخة أمان قبل الاستعادة'
             : 'Backup smart-merged cleanly'
           : isAr
-          ? 'تمت استعادة النسخة الاحتياطية (استبدال كامل) بنجاح'
-          : 'Backup restored'
+          ? 'تمت استعادة النسخة الاحتياطية مع إنشاء نسخة أمان تلقائية قبل الاستبدال'
+          : 'Backup restored with safety snapshot'
       );
       setBackupPreview(null);
+      setBackupRestorePassword('');
     }
   };
 
@@ -1111,7 +1141,7 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
               <div className="flex flex-col items-center gap-3 p-5 rounded-2xl border border-dashed border-slate-300 dark:border-white/15 bg-slate-50/80 dark:bg-white/[0.03]">
                 <div className="w-24 h-24 rounded-2xl bg-gradient-to-br from-[#26478D] to-[#0A0E1A] flex items-center justify-center overflow-hidden border border-white/15 shadow-lg">
                   <img
-                    src={draft.logoDataUrl || '/assets/aistudio/Aqar_plus_8de53ba4.svg'}
+                    src={draft.logoDataUrl || './assets/aistudio/Aqar_plus_8de53ba4.svg'}
                     alt="Company Logo"
                     referrerPolicy="no-referrer"
                     className={`w-full h-full ${draft.logoDataUrl ? 'object-cover' : 'object-contain p-3'}`}
@@ -1428,7 +1458,7 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
                     {draft.receiptBranding?.showLogo && (
                       <div className="w-8 h-8 rounded-lg bg-[#0A0E1A] flex items-center justify-center overflow-hidden p-1">
                         <img
-                          src={draft.logoDataUrl || '/assets/aistudio/Aqar_plus_8de53ba4.svg'}
+                          src={draft.logoDataUrl || './assets/aistudio/Aqar_plus_8de53ba4.svg'}
                           alt="Logo"
                           referrerPolicy="no-referrer"
                           className="w-full h-full object-contain"
@@ -1703,15 +1733,16 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
       {activeSection === 'security' && (
         <>
           <SectionSubHeader
-            onSave={() => {
+            onSave={async () => {
               if (/^\d{4,6}$/.test(pinDraft.trim())) {
                 localStorage.setItem(PIN_STORAGE_KEY, pinDraft.trim());
+                await changeCredentials({ newPin: pinDraft.trim() });
               }
               const nextSec = {
                 ...(draft.securityCenter || state.settings.securityCenter!),
                 patternCode: patternSequence.join('-') || '1-4-7-8-9',
               };
-              savePartialSettings({ securityCenter: nextSec }, isAr ? 'تم حفظ إعدادات الأمان والقفل بنجاح' : 'Security saved');
+              savePartialSettings({ securityCenter: nextSec }, isAr ? 'تم حفظ إعدادات الأمان والقفل وتحديث PIN بنجاح' : 'Security saved');
             }}
           />
 
@@ -2568,7 +2599,7 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
                             }
                             setValidatingFolder(item.key);
                             try {
-                              const resp = await fetch('/api/storage/validate-path', {
+                              const resp = await apiFetch('/api/storage/validate-path', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ path: checkPath }),
@@ -2680,8 +2711,13 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
                 </div>
                 <RippleButton
                   onClick={async () => {
+                    if (draft.backupPolicy?.encryptBackups && !backupEncryptPassword.trim()) {
+                      pushToast('error', isAr ? 'أدخل كلمة مرور لتشفير النسخة الاحتياطية بـ AES-256' : 'Enter password to encrypt backup');
+                      return;
+                    }
                     const res = await mutate('POST', '/api/backups', {
-                      label: `نسخة احتياطية ${draft.backupPolicy?.encryptBackups ? '(مشفرة) ' : ''}· ${new Date().toLocaleDateString('ar-SA')}`,
+                      label: `نسخة احتياطية ${draft.backupPolicy?.encryptBackups ? '(مشفرة AES-256) ' : ''}· ${new Date().toLocaleDateString('ar-SA')}`,
+                      encryptPassword: draft.backupPolicy?.encryptBackups ? backupEncryptPassword : undefined,
                     });
                     if (res) pushToast('success', isAr ? 'تم إنشاء نسخة احتياطية جديدة بنجاح' : 'Backup created');
                   }}
@@ -3415,32 +3451,83 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
                 </div>
               </div>
             )}
-            {backupPreview.exists ? (
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
-                  <span>العقارات:</span>
-                  <strong className="font-mono-num">{backupPreview.propertiesCount}</strong>
+            {backupPreview.requiresPassword ? (
+              <div className="space-y-3 text-xs p-3.5 rounded-xl border border-amber-500/30 bg-amber-500/10">
+                <div className="font-bold text-amber-700 dark:text-amber-300">
+                  هذه النسخة مشفرة بـ AES-256-GCM — أدخل كلمة المرور لمعاينة الفروقات والاستعادة:
                 </div>
-                <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
-                  <span>الوحدات:</span>
-                  <strong className="font-mono-num">{backupPreview.unitsCount}</strong>
+                {backupPreview.decryptionError && (
+                  <div className="text-red-500 font-semibold">{backupPreview.decryptionError}</div>
+                )}
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={backupRestorePassword}
+                    onChange={(e) => setBackupRestorePassword(e.target.value)}
+                    placeholder="كلمة مرور فك التشفير..."
+                    className="flex-1 px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#0A0E1A]"
+                  />
+                  <RippleButton
+                    type="button"
+                    onClick={() => void handlePreviewBackup(backupPreview.id, backupPreview.label, backupRestorePassword)}
+                  >
+                    فك التشفير والمعاينة
+                  </RippleButton>
                 </div>
-                <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
-                  <span>المستأجرون:</span>
-                  <strong className="font-mono-num">{backupPreview.tenantsCount}</strong>
+              </div>
+            ) : backupPreview.exists ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
+                    <span>العقارات:</span>
+                    <strong className="font-mono-num">{backupPreview.propertiesCount}</strong>
+                  </div>
+                  <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
+                    <span>الوحدات:</span>
+                    <strong className="font-mono-num">{backupPreview.unitsCount}</strong>
+                  </div>
+                  <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
+                    <span>المستأجرون:</span>
+                    <strong className="font-mono-num">{backupPreview.tenantsCount}</strong>
+                  </div>
+                  <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
+                    <span>العقود:</span>
+                    <strong className="font-mono-num">{backupPreview.contractsCount}</strong>
+                  </div>
+                  <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
+                    <span>السندات:</span>
+                    <strong className="font-mono-num">{backupPreview.paymentsCount}</strong>
+                  </div>
+                  <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
+                    <span>القوالب:</span>
+                    <strong className="font-mono-num">{backupPreview.templatesCount}</strong>
+                  </div>
                 </div>
-                <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
-                  <span>العقود:</span>
-                  <strong className="font-mono-num">{backupPreview.contractsCount}</strong>
-                </div>
-                <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
-                  <span>السندات:</span>
-                  <strong className="font-mono-num">{backupPreview.paymentsCount}</strong>
-                </div>
-                <div className="p-2.5 rounded-xl border border-slate-200 dark:border-white/10 flex justify-between">
-                  <span>القوالب:</span>
-                  <strong className="font-mono-num">{backupPreview.templatesCount}</strong>
-                </div>
+                {backupPreview.diff && (
+                  <div className="max-h-40 overflow-y-auto rounded-xl border border-slate-200 dark:border-white/10 divide-y divide-slate-100 dark:divide-white/5 text-[11px]">
+                    {(
+                      [
+                        ['properties', 'العقارات'],
+                        ['units', 'الوحدات'],
+                        ['tenants', 'المستأجرون'],
+                        ['contracts', 'العقود'],
+                        ['payments', 'السندات'],
+                        ['expenses', 'المصروفات'],
+                        ['tickets', 'الصيانة'],
+                      ] as const
+                    ).map(([k, label]) => {
+                      const d = backupPreview.diff![k];
+                      return (
+                        <div key={k} className="px-3 py-1.5 flex items-center justify-between gap-2">
+                          <span className="font-semibold">{label}</span>
+                          <span className="font-mono-num text-slate-500 dark:text-slate-300">
+                            +{d.added} جديد · ~{d.updated} تحديث · ={d.unchanged} مطابق
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-xs text-red-500">ملف النسخة غير موجود على الخادم — أنشئ نسخة فورية جديدة أولاً.</div>
@@ -3453,7 +3540,7 @@ export function SettingsCenterView({ initialSection = 'hub' }: { initialSection?
               >
                 إلغاء
               </button>
-              {backupPreview.exists && (
+              {backupPreview.exists && !backupPreview.requiresPassword && (
                 <RippleButton
                   variant={restoreMode === 'merge' ? 'primary' : 'danger'}
                   onClick={handleConfirmRestoreBackup}

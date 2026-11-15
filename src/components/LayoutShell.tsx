@@ -26,6 +26,7 @@ import {
   MessageSquareText,
   CalendarCheck,
   SlidersHorizontal,
+  LogOut,
 } from 'lucide-react';
 import { NavSection, PrimaryNavSection, useAqar } from '../context/AqarContext';
 import { formatDateTime } from '../utils/formatters';
@@ -58,6 +59,7 @@ export function LayoutShell({ children }: LayoutShellProps) {
     dismissToast,
     mutate,
     openOnboarding,
+    logout,
   } = useAqar();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -486,6 +488,17 @@ export function LayoutShell({ children }: LayoutShellProps) {
                     >
                       <Sparkles className="w-3.5 h-3.5" />
                       <span>{lang === 'ar' ? 'معالج البداية' : 'Setup Wizard'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUserMenuOpen(false);
+                        void logout();
+                      }}
+                      className="col-span-2 flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-semibold border border-red-500/25 bg-red-500/10 text-red-600 dark:text-red-300 hover:bg-red-500/20 cursor-pointer"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>{lang === 'ar' ? 'تسجيل الخروج من الحساب' : 'Sign Out'}</span>
                     </button>
                   </div>
                 </div>

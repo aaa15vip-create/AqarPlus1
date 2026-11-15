@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-server/
+release/
+.wrangler/
+.env
+.env.local
+data/*.sqlite
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/*.migrated.bak
+data/backups/*.json
+data/backups/*.enc.json
+*.log
+.DS_Store

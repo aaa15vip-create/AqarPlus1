@@ -419,7 +419,7 @@ export function AdvancedReportBuilder() {
     triggerHaptic('light');
     const esc = (s: unknown) =>
       String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const logoSrc = state.settings.logoDataUrl || '/assets/aistudio/Aqar_plus_8de53ba4.svg';
+    const logoSrc = state.settings.logoDataUrl || './assets/aistudio/Aqar_plus_8de53ba4.svg';
     const ths = activeFieldDefs.map((f) => `<th>${esc(f.labelAr)}</th>`).join('');
     const trs = rawRows
       .slice(0, 250)

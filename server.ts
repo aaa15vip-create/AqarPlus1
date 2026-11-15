@@ -1,12 +1,18 @@
 import http from 'http';
 import path from 'path';
-import express, { Request, Response } from 'express';
+import crypto from 'crypto';
+import express, { NextFunction, Request, Response } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import dotenv from 'dotenv';
 import { AqarStore } from './server/store';
 import { extractDocumentDataWithGemini } from './server/ocr';
+import { signSessionToken, verifySessionToken } from './server/cryptoAuth';
+import { dispatchSyncOperation } from './server/syncDispatcher';
 
 dotenv.config();
+
+const SESSION_COOKIE_NAME = 'aqar_session';
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 
 function resolvePort(): number {
   const portFlagIdx = process.argv.findIndex((a) => a === '--port' || a === '-p');
@@ -27,10 +33,22 @@ function resolvePort(): number {
 const PORT = resolvePort();
 const store = new AqarStore();
 
+interface AuthenticatedActor {
+  userId: string;
+  role: string;
+  sessionId: string;
+  rawToken: string;
+  deviceName?: string;
+  ipAddress: string;
+}
+
+type AuthedRequest = Request & { authActor?: AuthenticatedActor };
+
 interface ClientSession {
   ws: WebSocket;
   sessionId: string;
   userId: string;
+  authenticated: boolean;
   deviceName: string;
   ipAddress: string;
   connectedAt: string;
@@ -45,6 +63,85 @@ function extractClientIp(req: http.IncomingMessage): string {
   }
   const remote = req.socket?.remoteAddress || '127.0.0.1';
   return remote.replace(/^::ffff:/, '');
+}
+
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!cookieHeader) return result;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const val = part.slice(idx + 1).trim();
+    try {
+      result[key] = decodeURIComponent(val);
+    } catch {
+      result[key] = val;
+    }
+  }
+  return result;
+}
+
+function extractSessionToken(req: http.IncomingMessage): string | null {
+  const authHeader = req.headers['authorization'];
+  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+    return authHeader.slice(7).trim();
+  }
+  const cookies = parseCookies(req.headers['cookie']);
+  return cookies[SESSION_COOKIE_NAME] || null;
+}
+
+function resolveSessionActor(req: http.IncomingMessage, overrideToken?: string): AuthenticatedActor | null {
+  const rawToken = overrideToken || extractSessionToken(req);
+  if (!rawToken) return null;
+  const payload = verifySessionToken(rawToken, store.getSessionSecret());
+  if (!payload) return null;
+  const dbSession = store.getPersistence().isSessionActive(rawToken);
+  if (!dbSession || dbSession.userId !== payload.uid) return null;
+  const user = store.getState().users.find((u) => u.id === payload.uid && u.active);
+  if (!user) return null;
+
+  const rawDevice = req.headers['x-device-name'];
+  let deviceName = payload.deviceName;
+  if (rawDevice) {
+    try {
+      deviceName = decodeURIComponent(String(rawDevice));
+    } catch {
+      deviceName = String(rawDevice);
+    }
+  }
+  return {
+    userId: user.id,
+    role: user.role,
+    sessionId: payload.sid,
+    rawToken,
+    deviceName,
+    ipAddress: extractClientIp(req),
+  };
+}
+
+function issueUserSession(
+  res: Response,
+  userId: string,
+  role: string,
+  deviceName = 'Web Terminal'
+): { token: string; expiresAt: string } {
+  const now = Date.now();
+  const exp = now + SESSION_TTL_MS;
+  const expiresAt = new Date(exp).toISOString();
+  const sid = `ses-${crypto.randomBytes(8).toString('hex')}`;
+  const token = signSessionToken(
+    { sid, uid: userId, role, deviceName, iat: now, exp },
+    store.getSessionSecret()
+  );
+  store.getPersistence().createSession(token, userId, deviceName, expiresAt);
+  res.cookie(SESSION_COOKIE_NAME, token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: SESSION_TTL_MS,
+  });
+  return { token, expiresAt };
 }
 
 function getPresenceList() {
@@ -62,6 +159,7 @@ function getPresenceList() {
     }
   >();
   for (const s of activeSessions.values()) {
+    if (!s.authenticated) continue;
     const user = state.users.find((u) => u.id === s.userId);
     if (user) {
       seen.set(s.sessionId, {
@@ -80,8 +178,8 @@ function getPresenceList() {
 
 function broadcastPresence() {
   const payload = JSON.stringify({ type: 'presence:update', sessions: getPresenceList() });
-  for (const client of activeSessions.keys()) {
-    if (client.readyState === WebSocket.OPEN) {
+  for (const [client, session] of activeSessions.entries()) {
+    if (session.authenticated && client.readyState === WebSocket.OPEN) {
       client.send(payload);
     }
   }
@@ -89,39 +187,181 @@ function broadcastPresence() {
 
 function broadcastStateChange(actorUserId: string, eventSummary: string) {
   for (const [client, session] of activeSessions.entries()) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(
-        JSON.stringify({
-          type: 'state:updated',
-          actorUserId,
-          summary: eventSummary,
-          state: store.getStateForUser(session.userId),
-        })
-      );
+    if (session.authenticated && client.readyState === WebSocket.OPEN) {
+      try {
+        client.send(
+          JSON.stringify({
+            type: 'state:updated',
+            actorUserId,
+            summary: eventSummary,
+            state: store.getStateForUser(session.userId),
+          })
+        );
+      } catch {
+        // Skip deactivated or unauthorized WS session
+      }
     }
   }
 }
 
-function getActor(req: Request): { userId: string; deviceName?: string; ipAddress: string } {
-  const userId = String(req.headers['x-user-id'] || req.query.userId || 'usr-gm');
-  const rawDevice = req.headers['x-device-name'];
-  const deviceName = rawDevice ? decodeURIComponent(String(rawDevice)) : undefined;
-  return { userId, deviceName, ipAddress: extractClientIp(req) };
+function getActor(req: Request): AuthenticatedActor {
+  const actor = (req as AuthedRequest).authActor;
+  if (!actor) {
+    throw new Error('جلسة غير مصرح بها — يرجى تسجيل الدخول');
+  }
+  return actor;
 }
+
+const PUBLIC_API_EXACT = new Set([
+  '/api/health',
+  '/api/auth/session',
+  '/api/auth/login',
+  '/api/auth/login-pin',
+  '/api/auth/logout',
+  '/api/public/prospect-context',
+  '/api/public/leads',
+]);
 
 function handleApi(app: express.Express) {
   app.use(express.json({ limit: '15mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
-    res.json({ ok: true, lastUpdatedAt: store.getState().lastUpdatedAt });
+    res.json({
+      ok: true,
+      lastUpdatedAt: store.getState().lastUpdatedAt,
+      sqlite: store.getPersistence().getDiagnostics(),
+    });
+  });
+
+  // Authentication & Session Endpoints
+  app.get('/api/auth/session', (req: Request, res: Response) => {
+    const settings = store.getState().settings;
+    const demoLoginEnabled = process.env.AQAR_DEMO_LOGIN !== 'false';
+    const companyBranding = {
+      nameAr: settings.nameAr,
+      nameEn: settings.nameEn,
+      logoDataUrl: settings.logoDataUrl,
+    };
+    const actor = resolveSessionActor(req);
+    if (!actor) {
+      return res.json({
+        authenticated: false,
+        demoLoginEnabled,
+        loginProfiles: demoLoginEnabled ? store.getLoginProfiles() : [],
+        companyBranding,
+      });
+    }
+    const user = store.getState().users.find((u) => u.id === actor.userId);
+    res.json({
+      authenticated: true,
+      user,
+      token: actor.rawToken,
+      demoLoginEnabled,
+      loginProfiles: demoLoginEnabled ? store.getLoginProfiles() : [],
+      companyBranding,
+    });
+  });
+
+  app.post('/api/auth/login', (req: Request, res: Response) => {
+    try {
+      const identifier = String(req.body?.identifier || req.body?.email || req.body?.userId || '');
+      const password = String(req.body?.password || '');
+      const deviceName = req.body?.deviceName
+        ? String(req.body.deviceName)
+        : req.headers['x-device-name']
+        ? decodeURIComponent(String(req.headers['x-device-name']))
+        : 'Web Terminal';
+      const user = store.authenticatePassword(identifier, password, deviceName);
+      const { token, expiresAt } = issueUserSession(res, user.id, user.role, deviceName);
+      broadcastPresence();
+      res.json({
+        authenticated: true,
+        user,
+        token,
+        expiresAt,
+        state: store.getStateForUser(user.id),
+      });
+    } catch (e: unknown) {
+      res.status(401).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/auth/login-pin', (req: Request, res: Response) => {
+    try {
+      const userId = String(req.body?.userId || 'usr-sys_owner');
+      const pin = String(req.body?.pin || '');
+      const deviceName = req.body?.deviceName ? String(req.body.deviceName) : 'Web Terminal';
+      const user = store.authenticatePin(userId, pin, deviceName);
+      const { token, expiresAt } = issueUserSession(res, user.id, user.role, deviceName);
+      broadcastPresence();
+      res.json({
+        authenticated: true,
+        user,
+        token,
+        expiresAt,
+        state: store.getStateForUser(user.id),
+      });
+    } catch (e: unknown) {
+      res.status(401).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/auth/logout', (req: Request, res: Response) => {
+    const rawToken = extractSessionToken(req);
+    if (rawToken) {
+      store.getPersistence().revokeSession(rawToken);
+    }
+    res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
+    res.json({ ok: true });
+  });
+
+  // Strict Authentication Middleware for all protected /api/* routes
+  app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+    const fullPath = `/api${req.path}`;
+    if (PUBLIC_API_EXACT.has(fullPath) || fullPath.startsWith('/api/public/lead-decision/')) {
+      return next();
+    }
+    const actor = resolveSessionActor(req);
+    if (!actor) {
+      return res.status(401).json({
+        error: 'انتهت الجلسة أو لم يتم تسجيل الدخول — يرجى المصادقة للمتابعة',
+        code: 'AUTH_REQUIRED',
+      });
+    }
+    (req as AuthedRequest).authActor = actor;
+    next();
+  });
+
+  app.post('/api/auth/credentials', (req: Request, res: Response) => {
+    try {
+      const actor = getActor(req);
+      const targetUserId = String(req.body?.targetUserId || actor.userId);
+      store.updateUserCredentials(
+        actor.userId,
+        targetUserId,
+        {
+          currentPassword: req.body?.currentPassword,
+          newPassword: req.body?.newPassword,
+          newPin: req.body?.newPin,
+        },
+        actor.deviceName
+      );
+      res.json({ ok: true, state: store.getStateForUser(actor.userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
   });
 
   app.get('/api/state', (req: Request, res: Response) => {
-    const { userId } = getActor(req);
-    res.json({
-      state: store.getStateForUser(userId),
-      presence: getPresenceList(),
-    });
+    try {
+      const { userId } = getActor(req);
+      res.json({
+        state: store.getStateForUser(userId),
+        presence: getPresenceList(),
+      });
+    } catch (e: unknown) {
+      res.status(401).json({ error: (e as Error).message });
+    }
   });
 
   app.post('/api/properties', (req: Request, res: Response) => {
@@ -434,7 +674,12 @@ function handleApi(app: express.Express) {
   app.post('/api/backups', (req: Request, res: Response) => {
     try {
       const { userId, deviceName } = getActor(req);
-      const backup = store.createBackup(userId, req.body.label, deviceName);
+      const backup = store.createBackup(
+        userId,
+        req.body.label,
+        deviceName,
+        req.body?.encryptPassword ? String(req.body.encryptPassword) : undefined
+      );
       broadcastStateChange(userId, `إنشاء نسخة احتياطية`);
       res.status(201).json({ backup, state: store.getStateForUser(userId) });
     } catch (e: unknown) {
@@ -446,9 +691,10 @@ function handleApi(app: express.Express) {
     try {
       const { userId, deviceName } = getActor(req);
       const mode = req.body?.mode === 'merge' ? 'merge' : 'replace';
-      const restored = store.restoreBackup(userId, String(req.params.id), deviceName, mode);
+      const password = req.body?.password ? String(req.body.password) : undefined;
+      store.restoreBackup(userId, String(req.params.id), deviceName, mode, password);
       broadcastStateChange(userId, `استعادة نسخة احتياطية (${mode === 'merge' ? 'دمج ذكي' : 'استبدال كامل'})`);
-      res.json({ ok: true, mode, state: restored });
+      res.json({ ok: true, mode, state: store.getStateForUser(userId) });
     } catch (e: unknown) {
       res.status(400).json({ error: (e as Error).message });
     }
@@ -943,7 +1189,18 @@ function handleApi(app: express.Express) {
 
   app.get('/api/backups/:id/preview', (req: Request, res: Response) => {
     try {
-      const preview = store.previewBackup(String(req.params.id));
+      const password = req.query.password ? String(req.query.password) : undefined;
+      const preview = store.previewBackup(String(req.params.id), password);
+      res.json(preview);
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/backups/:id/preview', (req: Request, res: Response) => {
+    try {
+      const password = req.body?.password ? String(req.body.password) : undefined;
+      const preview = store.previewBackup(String(req.params.id), password);
       res.json(preview);
     } catch (e: unknown) {
       res.status(400).json({ error: (e as Error).message });
@@ -1296,12 +1553,19 @@ function handleApi(app: express.Express) {
 
       for (const op of operations) {
         if (!op || typeof op.endpoint !== 'string' || !op.endpoint.startsWith('/api/')) continue;
+        const operationId = String(op.operationId || op.idempotencyKey || '');
+        const opMethod: 'POST' | 'PATCH' | 'DELETE' =
+          op.method === 'PATCH' ? 'PATCH' : op.method === 'DELETE' ? 'DELETE' : 'POST';
         const evalRes = store.evaluateSyncOperationConflict(
-          op.userId || userId,
+          userId,
           {
-            idempotencyKey: String(op.idempotencyKey || ''),
-            method: op.method === 'PATCH' ? 'PATCH' : 'POST',
+            operationId,
+            idempotencyKey: String(op.idempotencyKey || operationId),
+            method: opMethod,
             endpoint: op.endpoint,
+            entityType: op.entityType ? String(op.entityType) : undefined,
+            entityId: op.entityId ? String(op.entityId) : undefined,
+            baseRevision: typeof op.baseRevision === 'number' ? op.baseRevision : undefined,
             descriptionAr: String(op.descriptionAr || ''),
             queuedAt: String(op.queuedAt || new Date().toISOString()),
             deviceName: op.deviceName || deviceName,
@@ -1315,25 +1579,30 @@ function handleApi(app: express.Express) {
         if (evalRes.conflict) {
           newConflicts.push(evalRes.conflict);
         }
-        try {
-          const resp = await fetch(`http://127.0.0.1:${PORT}${op.endpoint}`, {
-            method: op.method === 'PATCH' ? 'PATCH' : 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-user-id': op.userId || userId,
-              'x-device-name': encodeURIComponent(op.deviceName || deviceName),
-              'x-idempotency-key': String(op.idempotencyKey || ''),
-            },
-            body: op.body !== undefined ? JSON.stringify(op.body) : undefined,
-          });
-          if (!resp.ok) {
-            const errJson = await resp.json().catch(() => ({}));
-            errors.push(`${op.descriptionAr || op.endpoint}: ${errJson.error || resp.status}`);
-          } else {
-            uploaded += 1;
+        const dispatchRes = dispatchSyncOperation(store, {
+          method: opMethod,
+          endpoint: op.endpoint,
+          body: (op.body && typeof op.body === 'object' ? op.body : {}) as Record<string, unknown>,
+          userId,
+          deviceName: op.deviceName || deviceName,
+          idempotencyKey: String(op.idempotencyKey || operationId),
+          operationId,
+        });
+        if (!dispatchRes.ok) {
+          errors.push(`${op.descriptionAr || op.endpoint}: ${String(dispatchRes.data?.error || dispatchRes.status)}`);
+        } else {
+          if (operationId) {
+            store.recordSyncOperationResult(
+              operationId,
+              userId,
+              opMethod,
+              op.endpoint,
+              dispatchRes.data,
+              dispatchRes.entityType,
+              dispatchRes.entityId
+            );
           }
-        } catch (err: unknown) {
-          errors.push(`${op.descriptionAr || op.endpoint}: ${(err as Error).message}`);
+          uploaded += 1;
         }
       }
 
@@ -1489,46 +1758,55 @@ export async function startServer(customPort?: number) {
   });
 
   wss.on('connection', (ws, req) => {
-    const sessionId = `ses-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const fallbackSessionId = `ses-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const ipAddress = extractClientIp(req);
+    const upgradeActor = resolveSessionActor(req);
+
     activeSessions.set(ws, {
       ws,
-      sessionId,
-      userId: 'usr-gm',
-      deviceName: 'Web Browser',
+      sessionId: upgradeActor?.sessionId || fallbackSessionId,
+      userId: upgradeActor?.userId || '',
+      authenticated: Boolean(upgradeActor),
+      deviceName: upgradeActor?.deviceName || 'Web Browser',
       ipAddress,
       connectedAt: new Date().toISOString(),
     });
+
+    if (upgradeActor) {
+      ws.send(
+        JSON.stringify({
+          type: 'state:init',
+          state: store.getStateForUser(upgradeActor.userId),
+          presence: getPresenceList(),
+        })
+      );
+      broadcastPresence();
+    }
 
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(String(raw));
         if (msg.type === 'session:identify') {
           const prev = activeSessions.get(ws);
-          const nextUserId = String(msg.userId || 'usr-gm');
-          const nextDevice = String(msg.deviceName || 'Web Browser');
-          const shouldLogLogin = !prev || prev.userId !== nextUserId;
+          const verifiedActor = resolveSessionActor(req, typeof msg.token === 'string' ? msg.token : undefined);
+          if (!verifiedActor) {
+            ws.send(JSON.stringify({ type: 'auth:required', error: 'جلسة WebSocket غير مصرح بها' }));
+            return;
+          }
+          const nextDevice = String(msg.deviceName || verifiedActor.deviceName || 'Web Browser');
           activeSessions.set(ws, {
             ws,
-            sessionId: prev?.sessionId || sessionId,
-            userId: nextUserId,
+            sessionId: verifiedActor.sessionId || prev?.sessionId || fallbackSessionId,
+            userId: verifiedActor.userId,
+            authenticated: true,
             deviceName: nextDevice,
             ipAddress,
             connectedAt: prev?.connectedAt || new Date().toISOString(),
           });
-          if (shouldLogLogin) {
-            store.recordLoginEvent({
-              userId: nextUserId,
-              deviceName: nextDevice,
-              ipAddress,
-              method: 'كلمة المرور',
-              success: true,
-            });
-          }
           ws.send(
             JSON.stringify({
               type: 'state:init',
-              state: store.getStateForUser(nextUserId),
+              state: store.getStateForUser(verifiedActor.userId),
               presence: getPresenceList(),
             })
           );
@@ -1564,6 +1842,10 @@ export async function startServer(customPort?: number) {
 
   server.on('error', (err) => {
     console.error('HTTP Server error:', err);
+  });
+
+  server.on('close', () => {
+    store.getPersistence().close();
   });
 
   await new Promise<void>((resolve) => {

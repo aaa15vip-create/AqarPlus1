@@ -389,6 +389,10 @@ export function applyStaticModeMutation(
   }
 
   if (method === 'POST' && endpoint === '/api/permissions/toggle') {
+    const allowedPerms = next.rolePermissions[actor?.role || 'gm'] || [];
+    if (!allowedPerms.includes('manage_users') && actor?.role !== 'sys_owner' && actor?.role !== 'gm') {
+      throw new Error('صلاحية إدارة المستخدمين والصلاحيات مطلوبة لتنفيذ هذا الإجراء');
+    }
     const role = body.role as RoleKey;
     const perm = body.permission as PermissionKey;
     const currentPerms = next.rolePermissions[role] || [];
@@ -455,6 +459,10 @@ export function applyStaticModeMutation(
   }
 
   if (method === 'POST' && endpoint === '/api/workspace/reset-fresh') {
+    const allowedPerms = next.rolePermissions[actor?.role || 'gm'] || [];
+    if (!allowedPerms.includes('backup_restore') && actor?.role !== 'sys_owner' && actor?.role !== 'gm') {
+      throw new Error('صلاحية مالك النظام أو المدير مطلوبة لإعادة تهيئة مساحة العمل');
+    }
     next.properties = [];
     next.units = [];
     next.tenants = [];
