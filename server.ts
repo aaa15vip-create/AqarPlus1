@@ -2,14 +2,29 @@ import http from 'http';
 import path from 'path';
 import express, { Request, Response } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { AqarStore } from './server/store';
 import { extractDocumentDataWithGemini } from './server/ocr';
 
 dotenv.config();
 
-const PORT = Number(process.env.PORT) || 3000;
+function resolvePort(): number {
+  const portFlagIdx = process.argv.findIndex((a) => a === '--port' || a === '-p');
+  if (portFlagIdx !== -1 && process.argv[portFlagIdx + 1]) {
+    const parsed = Number(process.argv[portFlagIdx + 1]);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  const eqFlag = process.argv.find((a) => a.startsWith('--port='));
+  if (eqFlag) {
+    const parsed = Number(eqFlag.split('=')[1]);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  const envPort = Number(process.env.PORT);
+  if (Number.isFinite(envPort) && envPort > 0 && envPort !== 8080) return envPort;
+  return 3000;
+}
+
+const PORT = resolvePort();
 const store = new AqarStore();
 
 interface ClientSession {
@@ -430,9 +445,10 @@ function handleApi(app: express.Express) {
   app.post('/api/backups/:id/restore', (req: Request, res: Response) => {
     try {
       const { userId, deviceName } = getActor(req);
-      const restored = store.restoreBackup(userId, String(req.params.id), deviceName);
-      broadcastStateChange(userId, `استعادة نسخة احتياطية`);
-      res.json({ ok: true, state: restored });
+      const mode = req.body?.mode === 'merge' ? 'merge' : 'replace';
+      const restored = store.restoreBackup(userId, String(req.params.id), deviceName, mode);
+      broadcastStateChange(userId, `استعادة نسخة احتياطية (${mode === 'merge' ? 'دمج ذكي' : 'استبدال كامل'})`);
+      res.json({ ok: true, mode, state: restored });
     } catch (e: unknown) {
       res.status(400).json({ error: (e as Error).message });
     }
@@ -786,6 +802,17 @@ function handleApi(app: express.Express) {
     }
   });
 
+  app.delete('/api/team/users/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const result = store.deleteStaffUser(userId, String(req.params.id), deviceName);
+      broadcastStateChange(userId, 'حذف حساب مستخدم');
+      res.json({ ...result, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
   app.patch('/api/team/security-policy', (req: Request, res: Response) => {
     try {
       const { userId, deviceName } = getActor(req);
@@ -990,14 +1017,476 @@ function handleApi(app: express.Express) {
       res.status(400).json({ error: (e as Error).message });
     }
   });
+
+  // Tenant Files Center Endpoints
+  app.patch('/api/tenants/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const tenant = store.updateTenant(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `تحديث ملف المستأجر ${tenant.nameAr}`);
+      res.json({ tenant, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/tenants/:id/notes', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const note = store.addTenantViolationNote(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `تسجيل ملاحظة/مخالفة لملف المستأجر`);
+      res.status(201).json({ note, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/tenants/:id/appointments', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const log = store.scheduleTenantAppointment(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `جدولة موعد مع المستأجر ${log.targetName}`);
+      res.status(201).json({ log, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.patch('/api/contracts/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const contract = store.updateContractDetails(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `تعديل بيانات العقد ${contract.internalNumber}`);
+      res.json({ contract, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Expenses & Supplier Invoices Center Endpoints
+  app.patch('/api/expenses/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const expense = store.updateOrCancelExpense(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `تحديث المصروف ${expense.expenseNumber}`);
+      res.json({ expense, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.patch('/api/vendors/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const vendor = store.updateVendor(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `تحديث ملف وتقييم المورد ${vendor.nameAr}`);
+      res.json({ vendor, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/supplier-invoices', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const invoice = store.createSupplierInvoice(userId, req.body, deviceName);
+      broadcastStateChange(userId, `تسجيل فاتورة مورد ${invoice.invoiceCode}`);
+      res.status(201).json({ invoice, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.patch('/api/supplier-invoices/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const invoice = store.updateSupplierInvoice(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `تحديث فاتورة المورد ${invoice.invoiceCode}`);
+      res.json({ invoice, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/recurring-expenses', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const rule = store.createRecurringExpense(userId, req.body, deviceName);
+      broadcastStateChange(userId, `إضافة مصروف دوري: ${rule.title}`);
+      res.status(201).json({ rule, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.patch('/api/recurring-expenses/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const rule = store.toggleRecurringExpense(userId, String(req.params.id), Boolean(req.body.enabled), deviceName);
+      broadcastStateChange(userId, `تحديث المصروف الدوري: ${rule.title}`);
+      res.json({ rule, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/recurring-expenses/generate', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const created = store.generateDueRecurringExpenses(userId, req.body?.month, deviceName);
+      broadcastStateChange(userId, `توليد ${created.length} مسودة مصروف دوري`);
+      res.status(201).json({ created, count: created.length, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/property-budgets', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const budget = store.upsertPropertyBudget(userId, req.body, deviceName);
+      broadcastStateChange(userId, `تحديث ميزانية العقار لشهر ${budget.month}`);
+      res.status(201).json({ budget, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.patch('/api/leads/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const lead = store.updateLead(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `تحديث بيانات المهتم ${lead.nameAr}`);
+      res.json({ lead, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/leads/:id/escalate', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const escalation = store.escalateLead(userId, String(req.params.id), req.body, deviceName);
+      broadcastStateChange(userId, `إرسال بيانات المهتم ${escalation.snapshot.leadName} للمراجعة`);
+      res.status(201).json({ escalation, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/lead-escalations/:id/decision', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const escalation = store.decideLeadEscalation(
+        userId,
+        String(req.params.id),
+        { decision: req.body.decision, decisionNotes: req.body.decisionNotes, isToken: false },
+        deviceName
+      );
+      broadcastStateChange(userId, `قرار طلب المهتم ${escalation.requestCode}: ${escalation.status}`);
+      res.json({ escalation, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/leads/:id/convert', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const result = store.convertLeadToTenant(userId, String(req.params.id), deviceName);
+      broadcastStateChange(userId, `تحويل المهتم ${result.lead.nameAr} إلى مستأجر`);
+      res.status(201).json({ ...result, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/meters/readings', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const reading = store.createMeterReading(userId, req.body, deviceName);
+      broadcastStateChange(userId, `تسجيل قراءة عداد ${reading.meterType} (${reading.meterNumber})`);
+      res.status(201).json({ reading, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Public Prospect Intake & External Owner Decision Portals (Zero leakage)
+  app.get('/api/public/prospect-context', (_req: Request, res: Response) => {
+    const full = store.getState();
+    res.json({
+      companyName: full.settings.nameAr,
+      companyPhone: full.settings.phone,
+      properties: full.properties
+        .filter((p) => p.status === 'نشط')
+        .map((p) => ({
+          id: p.id,
+          nameAr: p.nameAr,
+          city: p.city,
+          district: p.district,
+          units: full.units
+            .filter((u) => u.propertyId === p.id && u.status === 'شاغرة')
+            .map((u) => ({
+              id: u.id,
+              unitNumber: u.unitNumber,
+              unitType: u.unitType,
+              rooms: u.rooms,
+              suggestedMonthlyRent: u.suggestedMonthlyRent,
+            })),
+        })),
+    });
+  });
+
+  app.post('/api/public/leads', (req: Request, res: Response) => {
+    try {
+      const result = store.createPublicLead(req.body);
+      broadcastStateChange('public-portal', `تسجيل مهتم جديد عبر الرابط العام: ${result.lead.nameAr}`);
+      res.status(201).json(result);
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/public/lead-decision/:token', (req: Request, res: Response) => {
+    try {
+      const data = store.getLeadEscalationByToken(String(req.params.token));
+      res.json(data);
+    } catch (e: unknown) {
+      res.status(404).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/public/lead-decision/:token', (req: Request, res: Response) => {
+    try {
+      const escalation = store.decideLeadEscalation(
+        null,
+        String(req.params.token),
+        { decision: req.body.decision, decisionNotes: req.body.decisionNotes, isToken: true },
+        'External Owner Link'
+      );
+      broadcastStateChange(escalation.recipientId, `قرار المالك (${escalation.requestCode}): ${escalation.status}`);
+      res.json({ escalation });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Sync Engine Endpoints (Delta Pull + Batch Conflict-Aware Upload)
+  app.get('/api/sync/delta', (req: Request, res: Response) => {
+    try {
+      const { userId } = getActor(req);
+      const since = req.query.since ? String(req.query.since) : undefined;
+      res.json(store.getSyncDelta(userId, since));
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/sync/batch', async (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const operations = Array.isArray(req.body?.operations) ? req.body.operations : [];
+      const clientLastUpdatedAt = req.body?.clientLastUpdatedAt ? String(req.body.clientLastUpdatedAt) : undefined;
+      const beforeRevision = store.getState().syncRevision || 1;
+      let uploaded = 0;
+      let skippedDuplicates = 0;
+      const newConflicts = [];
+      const errors: string[] = [];
+
+      for (const op of operations) {
+        if (!op || typeof op.endpoint !== 'string' || !op.endpoint.startsWith('/api/')) continue;
+        const evalRes = store.evaluateSyncOperationConflict(
+          op.userId || userId,
+          {
+            idempotencyKey: String(op.idempotencyKey || ''),
+            method: op.method === 'PATCH' ? 'PATCH' : 'POST',
+            endpoint: op.endpoint,
+            descriptionAr: String(op.descriptionAr || ''),
+            queuedAt: String(op.queuedAt || new Date().toISOString()),
+            deviceName: op.deviceName || deviceName,
+          },
+          clientLastUpdatedAt
+        );
+        if (evalRes.skipDuplicate) {
+          skippedDuplicates += 1;
+          continue;
+        }
+        if (evalRes.conflict) {
+          newConflicts.push(evalRes.conflict);
+        }
+        try {
+          const resp = await fetch(`http://127.0.0.1:${PORT}${op.endpoint}`, {
+            method: op.method === 'PATCH' ? 'PATCH' : 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-user-id': op.userId || userId,
+              'x-device-name': encodeURIComponent(op.deviceName || deviceName),
+              'x-idempotency-key': String(op.idempotencyKey || ''),
+            },
+            body: op.body !== undefined ? JSON.stringify(op.body) : undefined,
+          });
+          if (!resp.ok) {
+            const errJson = await resp.json().catch(() => ({}));
+            errors.push(`${op.descriptionAr || op.endpoint}: ${errJson.error || resp.status}`);
+          } else {
+            uploaded += 1;
+          }
+        } catch (err: unknown) {
+          errors.push(`${op.descriptionAr || op.endpoint}: ${(err as Error).message}`);
+        }
+      }
+
+      if (uploaded > 0 || newConflicts.length > 0) {
+        broadcastStateChange(userId, `مزامنة دفعية (${uploaded} عملية${newConflicts.length ? ` · ${newConflicts.length} تعارض` : ''})`);
+      }
+
+      res.json({
+        uploaded,
+        skippedDuplicates,
+        conflictsDetected: newConflicts.length,
+        newConflicts,
+        errors,
+        previousRevision: beforeRevision,
+        syncedAt: new Date().toISOString(),
+        state: store.getStateForUser(userId),
+      });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Scheduled Reports Endpoints
+  app.post('/api/reports/schedules', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const schedule = store.createScheduledReport(userId, req.body, deviceName);
+      broadcastStateChange(userId, `جدولة تقرير تلقائي: ${schedule.title}`);
+      res.status(201).json({ schedule, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.delete('/api/reports/schedules/:id', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const result = store.deleteScheduledReport(userId, String(req.params.id), deviceName);
+      broadcastStateChange(userId, 'إزالة جدولة تقرير');
+      res.json({ ...result, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/reports/schedules/:id/run', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const schedule = store.runScheduledReportNow(userId, String(req.params.id), deviceName);
+      broadcastStateChange(userId, `تشغيل تقرير مجدول: ${schedule.title}`);
+      res.json({ schedule, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // ZATCA E-Invoicing & Tax Archive Endpoints
+  app.post('/api/zatca/invoices', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const invoice = store.createZatcaInvoice(userId, req.body, deviceName);
+      broadcastStateChange(userId, `إصدار فاتورة إلكترونية ZATCA (${invoice.invoiceNumber})`);
+      res.status(201).json({ invoice, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Favorite Custom Reports & Shared Search Filters
+  app.post('/api/reports/favorites', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const preset = store.saveFavoriteReport(userId, req.body, deviceName);
+      broadcastStateChange(userId, `حفظ تقرير مفضل: ${preset.title}`);
+      res.status(201).json({ preset, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.delete('/api/reports/favorites/:id', (req: Request, res: Response) => {
+    try {
+      const { userId } = getActor(req);
+      const result = store.deleteFavoriteReport(userId, String(req.params.id));
+      broadcastStateChange(userId, 'إزالة تقرير مفضل');
+      res.json({ ...result, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/search/filters', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const filter = store.saveSharedSearchFilter(userId, req.body, deviceName);
+      broadcastStateChange(userId, `حفظ فلتر بحث: ${filter.name}`);
+      res.status(201).json({ filter, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.delete('/api/search/filters/:id', (req: Request, res: Response) => {
+    try {
+      const { userId } = getActor(req);
+      const result = store.deleteSharedSearchFilter(userId, String(req.params.id));
+      broadcastStateChange(userId, 'حذف فلتر بحث');
+      res.json({ ...result, state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Custom Disk Storage Endpoints (Backups / Archive / Documents)
+  app.get('/api/storage/status', (_req: Request, res: Response) => {
+    try {
+      res.json(store.getStorageStatus());
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/storage/validate-path', (req: Request, res: Response) => {
+    try {
+      const result = store.validateStorageFolder(String(req.body?.path || ''));
+      res.json(result);
+    } catch (e: unknown) {
+      res.status(400).json({ ok: false, error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/storage/sync-folders', (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName } = getActor(req);
+      const result = store.syncFoldersToDisk(userId, deviceName);
+      broadcastStateChange(userId, 'مزامنة وتهيئة مجلدات التخزين المحلية على القرص');
+      res.json({ ...result, status: store.getStorageStatus(), state: store.getStateForUser(userId) });
+    } catch (e: unknown) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
 }
 
-async function startServer() {
+export async function startServer(customPort?: number) {
+  const listenPort = customPort && Number.isFinite(customPort) ? customPort : PORT;
   const app = express();
   handleApi(app);
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
+  wss.on('error', (err) => {
+    console.error('WebSocketServer error:', err.message);
+  });
 
   wss.on('connection', (ws, req) => {
     const sessionId = `ses-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1057,22 +1546,36 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: { middlewareMode: true, hmr: false, ws: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(process.cwd(), 'dist');
+    const distDir = process.env.AQARPLUS_DIST_DIR
+      ? path.resolve(process.env.AQARPLUS_DIST_DIR)
+      : path.resolve(process.cwd(), 'dist');
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }
 
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`AqarPlus centralized server running on http://0.0.0.0:${PORT}`);
+  server.on('error', (err) => {
+    console.error('HTTP Server error:', err);
   });
+
+  await new Promise<void>((resolve) => {
+    server.listen(listenPort, '0.0.0.0', () => {
+      console.log(`AqarPlus centralized server running on http://0.0.0.0:${listenPort}`);
+      resolve();
+    });
+  });
+
+  return { server, port: listenPort };
 }
 
-startServer();
+if (process.env.AQARPLUS_NO_AUTO_START !== '1') {
+  startServer();
+}

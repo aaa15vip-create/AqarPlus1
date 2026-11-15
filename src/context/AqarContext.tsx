@@ -9,8 +9,12 @@ import {
 import {
   convertCurrency,
   DEFAULT_CURRENCY_RATES_TO_SAR,
+  DisplayFormatPrefs,
   formatCurrency,
+  setDisplayFormatPrefs,
 } from '../utils/formatters';
+import { applyStaticModeMutation } from '../utils/staticModeFallback';
+import { SyncBatchUploadResult, SyncEngine } from '../utils/syncEngine';
 
 export interface ActiveSessionInfo {
   sessionId?: string;
@@ -30,6 +34,7 @@ export interface ToastMessage {
 
 export type PrimaryNavSection =
   | 'dashboard'
+  | 'daily_hub'
   | 'properties'
   | 'leasing_finance'
   | 'tenants'
@@ -71,9 +76,13 @@ interface AqarContextValue {
   baseCurrency: CurrencyCode;
   setBaseCurrency: (currency: CurrencyCode) => void;
   currencyRates: Record<CurrencyCode, number>;
+  displayPrefs: DisplayFormatPrefs;
   convertToBase: (amount: number, fromCurrency?: CurrencyCode) => number;
   formatInCurrency: (amount: number, currency?: CurrencyCode) => string;
   formatConvertedBase: (amount: number, fromCurrency?: CurrencyCode) => string;
+  tenantsTabHint: 'tenants' | 'leads' | 'reports';
+  setTenantsTabHint: (tab: 'tenants' | 'leads' | 'reports') => void;
+  openLeadsHub: () => void;
   activeCompanyId: string;
   setActiveCompanyId: (companyId: string) => void;
   wsStatus: 'connected' | 'connecting' | 'offline';
@@ -82,6 +91,9 @@ interface AqarContextValue {
   toggleOfflineSimulation: () => void;
   offlineQueue: OfflineQueuedAction[];
   syncOfflineQueue: () => Promise<void>;
+  runFullSync: () => Promise<SyncBatchUploadResult | null>;
+  lastSyncAt: string | null;
+  lastSyncResult: SyncBatchUploadResult | null;
   pendingMutationsCount: number;
   presence: ActiveSessionInfo[];
   toasts: ToastMessage[];
@@ -135,11 +147,10 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
   const [theme, setTheme] = useState<'dark' | 'light'>(
     () => (localStorage.getItem(THEME_STORAGE_KEY) as 'dark' | 'light') || 'dark'
   );
-  const [baseCurrency, setBaseCurrencyState] = useState<CurrencyCode>(
-    () => (localStorage.getItem(BASE_CURRENCY_STORAGE_KEY) as CurrencyCode) || 'SAR'
-  );
+  const baseCurrency: CurrencyCode = 'SAR';
   const [activeCompanyId, setActiveCompanyId] = useState<string>('all');
   const [activeNav, setActiveNavState] = useState<PrimaryNavSection>('dashboard');
+  const [tenantsTabHint, setTenantsTabHint] = useState<'tenants' | 'leads' | 'reports'>('tenants');
   const [leasingFinanceTab, setLeasingFinanceTab] = useState<LeasingFinanceTab>('leasing');
   const [leasingWizardUnitId, setLeasingWizardUnitId] = useState<string | null>(null);
   const [onboardingConfig, setOnboardingConfig] = useState<{
@@ -173,6 +184,9 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       setActiveNavState('reports');
       return;
     }
+    if (nav === 'settings' && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('aqar:settings-hub'));
+    }
     setActiveNavState(nav);
   }, []);
 
@@ -181,8 +195,16 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
     setLeasingFinanceTab('leasing');
     setActiveNavState('leasing_finance');
   }, []);
+
+  const openLeadsHub = useCallback(() => {
+    setTenantsTabHint('leads');
+    setActiveNavState('tenants');
+  }, []);
   const [wsStatus, setWsStatus] = useState<'connected' | 'connecting' | 'offline'>('connecting');
+  const [isStaticMode, setIsStaticMode] = useState(false);
   const [isOfflineSimulated, setIsOfflineSimulated] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
+  const [lastSyncResult, setLastSyncResult] = useState<SyncBatchUploadResult | null>(null);
   const [presence, setPresence] = useState<ActiveSessionInfo[]>([]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [offlineQueue, setOfflineQueue] = useState<OfflineQueuedAction[]>(() => {
@@ -197,6 +219,8 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
   const wsRef = useRef<WebSocket | null>(null);
   const activeUserIdRef = useRef(activeUserId);
   activeUserIdRef.current = activeUserId;
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const inFlightKeysRef = useRef<Set<string>>(new Set());
 
   const cacheStateSnapshot = useCallback((nextState: AqarDatabaseState) => {
@@ -254,9 +278,8 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
     setLangState(next);
   }, []);
 
-  const setBaseCurrency = useCallback((next: CurrencyCode) => {
-    setBaseCurrencyState(next);
-    localStorage.setItem(BASE_CURRENCY_STORAGE_KEY, next);
+  const setBaseCurrency = useCallback((_next: CurrencyCode) => {
+    localStorage.removeItem(BASE_CURRENCY_STORAGE_KEY);
   }, []);
 
   const currencyRates = useMemo<Record<CurrencyCode, number>>(
@@ -266,6 +289,28 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
     }),
     [state?.settings?.currencyRatesToSar]
   );
+
+  const displayPrefs = useMemo<DisplayFormatPrefs>(() => {
+    const calCfg = state?.settings?.calendarConfig;
+    const genCfg = state?.settings?.generalPrefs;
+    const calType: DisplayFormatPrefs['calendarType'] =
+      calCfg?.calendarType ||
+      genCfg?.calendar ||
+      (state?.settings?.dateCalendar === 'ميلادي فقط' ? 'gregorian' : 'both');
+    const dateFmt: DisplayFormatPrefs['dateFormat'] =
+      calCfg?.dateFormat || genCfg?.dateFormat || 'DD/MM/YYYY';
+    const numerals: DisplayFormatPrefs['numerals'] =
+      calCfg?.numerals || genCfg?.numeralFormat || 'en';
+    return setDisplayFormatPrefs({
+      calendarType: calType,
+      dateFormat: dateFmt,
+      numerals,
+    });
+  }, [
+    state?.settings?.calendarConfig,
+    state?.settings?.generalPrefs,
+    state?.settings?.dateCalendar,
+  ]);
 
   const convertToBase = useCallback(
     (amount: number, fromCurrency: CurrencyCode = 'SAR') => {
@@ -303,12 +348,45 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       const res = await fetch('/api/state', {
         headers: { 'x-user-id': uid },
       });
-      if (!res.ok) throw new Error('Failed to fetch state');
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        throw new Error('Static host or backend unavailable');
+      }
       const data = await res.json();
+      setIsStaticMode(false);
       cacheStateSnapshot(data.state);
       if (data.presence) setPresence(data.presence);
-    } catch (err) {
-      console.error(err);
+    } catch {
+      // Static hosting (e.g. GitHub Pages) or offline startup fallback: hydrate from cache or bundled seed
+      setIsStaticMode(true);
+      setWsStatus('offline');
+      let hydrated = stateRef.current;
+      if (!hydrated) {
+        try {
+          const cached = localStorage.getItem(CACHED_STATE_KEY);
+          if (cached) hydrated = JSON.parse(cached) as AqarDatabaseState;
+        } catch {
+          // ignore malformed cache
+        }
+      }
+      if (!hydrated) {
+        const { createInitialSeed } = await import('../../server/seed');
+        hydrated = createInitialSeed();
+      }
+      cacheStateSnapshot(hydrated);
+      const userObj = hydrated.users.find((u) => u.id === uid) || hydrated.users[0];
+      if (userObj) {
+        setPresence([
+          {
+            sessionId: 'static-browser',
+            userId: userObj.id,
+            nameAr: userObj.nameAr,
+            roleLabelAr: userObj.roleLabelAr,
+            deviceName: 'Browser (Local Mode)',
+            connectedAt: new Date().toISOString(),
+          },
+        ]);
+      }
     } finally {
       setLoading(false);
     }
@@ -324,7 +402,7 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
 
   // WebSocket live connection
   useEffect(() => {
-    if (isOfflineSimulated) {
+    if (isOfflineSimulated || isStaticMode) {
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -396,7 +474,7 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       wsRef.current?.close();
     };
-  }, [isOfflineSimulated, pushToast, openOnboarding, cacheStateSnapshot]);
+  }, [isOfflineSimulated, isStaticMode, pushToast, openOnboarding, cacheStateSnapshot]);
 
   // Identify updated role on WS when switching users
   useEffect(() => {
@@ -433,44 +511,62 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
 
   const syncOfflineQueue = useCallback(async () => {
     if (offlineQueue.length === 0 || isOfflineSimulated) return;
-    const remaining: OfflineQueuedAction[] = [];
-    let syncedCount = 0;
-
-    for (const action of offlineQueue) {
-      try {
-        const res = await fetch(action.endpoint, {
-          method: action.method,
-          headers: {
-            'Content-Type': 'application/json',
-            'x-user-id': action.userId,
-            'x-device-name': encodeURIComponent(action.deviceName),
-            'x-idempotency-key': action.idempotencyKey,
-          },
-          body: action.body ? JSON.stringify(action.body) : undefined,
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          pushToast('error', `تعذر مزامنة (${action.descriptionAr}): ${data.error || 'خطأ'}`);
-        } else {
-          syncedCount += 1;
-          if (data.state) cacheStateSnapshot(data.state);
-        }
-      } catch {
-        remaining.push(action);
+    try {
+      const result = await SyncEngine.uploadPendingOperations(offlineQueue, state?.lastUpdatedAt);
+      setLastSyncAt(result.syncedAt);
+      setLastSyncResult(result);
+      if (result.state) cacheStateSnapshot(result.state);
+      if (result.errors.length === 0) {
+        setOfflineQueue([]);
+      } else {
+        pushToast('error', result.errors[0]);
       }
+      if (result.uploaded > 0) {
+        pushToast(
+          'success',
+          lang === 'ar'
+            ? `تمت مزامنة ${result.uploaded} عملية عبر Sync Engine${result.conflictsDetected > 0 ? ` (${result.conflictsDetected} تعارض)` : ''}`
+            : `Synced ${result.uploaded} offline operations`
+        );
+      } else if (result.skippedDuplicates > 0) {
+        setOfflineQueue([]);
+      }
+      await fetchState(activeUserIdRef.current);
+    } catch {
+      // keep queued items for retry
     }
+  }, [offlineQueue, isOfflineSimulated, state?.lastUpdatedAt, lang, pushToast, fetchState, cacheStateSnapshot]);
 
-    setOfflineQueue(remaining);
-    if (syncedCount > 0) {
+  const runFullSync = useCallback(async (): Promise<SyncBatchUploadResult | null> => {
+    if (isOfflineSimulated) {
+      pushToast('error', lang === 'ar' ? 'لا يمكن المزامنة أثناء وضع عدم الاتصال المحاكى' : 'Disable offline mode first');
+      return null;
+    }
+    try {
+      const uploadResult = await SyncEngine.uploadPendingOperations(offlineQueue, state?.lastUpdatedAt);
+      if (uploadResult.errors.length === 0 && offlineQueue.length > 0) {
+        setOfflineQueue([]);
+      }
+      const delta = await SyncEngine.fetchDelta(activeUserIdRef.current, lastSyncAt || undefined);
+      if (delta.state) {
+        cacheStateSnapshot(delta.state);
+      } else if (uploadResult.state) {
+        cacheStateSnapshot(uploadResult.state);
+      }
+      setLastSyncAt(uploadResult.syncedAt);
+      setLastSyncResult(uploadResult);
       pushToast(
         'success',
         lang === 'ar'
-          ? `تمت مزامنة ${syncedCount} عملية مسجلة دون إنترنت بنجاح دون تكرار`
-          : `Synced ${syncedCount} offline actions idempotently`
+          ? `اكتملت المزامنة (الإصدار #${delta.serverRevision} · مرفوع: ${uploadResult.uploaded} · تعارضات معلقة: ${delta.pendingConflictsCount})`
+          : `Sync completed (rev #${delta.serverRevision})`
       );
-      await fetchState(activeUserIdRef.current);
+      return uploadResult;
+    } catch (err) {
+      pushToast('error', (err as Error).message);
+      return null;
     }
-  }, [offlineQueue, isOfflineSimulated, lang, pushToast, fetchState, cacheStateSnapshot]);
+  }, [isOfflineSimulated, offlineQueue, state?.lastUpdatedAt, lastSyncAt, lang, pushToast, cacheStateSnapshot]);
 
   const toggleOfflineSimulation = useCallback(() => {
     setIsOfflineSimulated((prev) => {
@@ -510,6 +606,18 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       }
 
       const deviceName = currentUser?.deviceName || 'Web Terminal';
+
+      if (isStaticMode && stateRef.current) {
+        const localResult = applyStaticModeMutation(
+          stateRef.current,
+          activeUserIdRef.current,
+          method,
+          endpoint,
+          body
+        );
+        cacheStateSnapshot(localResult.state);
+        return localResult as T;
+      }
 
       if (isOfflineSimulated || !navigator.onLine) {
         if (method === 'DELETE') {
@@ -551,6 +659,19 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
           },
           body: body !== undefined ? JSON.stringify(body) : undefined,
         });
+        const contentType = res.headers.get('content-type') || '';
+        if (!contentType.includes('application/json') && stateRef.current) {
+          setIsStaticMode(true);
+          const localResult = applyStaticModeMutation(
+            stateRef.current,
+            activeUserIdRef.current,
+            method,
+            endpoint,
+            body
+          );
+          cacheStateSnapshot(localResult.state);
+          return localResult as T;
+        }
         const data = await res.json();
         if (!res.ok) {
           pushToast('error', data.error || 'تعذر تنفيذ العملية');
@@ -566,7 +687,7 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
         setPendingMutationsCount((c) => Math.max(0, c - 1));
       }
     },
-    [currentUser, isOfflineSimulated, lang, pushToast, cacheStateSnapshot]
+    [currentUser, isOfflineSimulated, isStaticMode, lang, pushToast, cacheStateSnapshot]
   );
 
   const value = useMemo<AqarContextValue>(
@@ -590,9 +711,13 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       baseCurrency,
       setBaseCurrency,
       currencyRates,
+      displayPrefs,
       convertToBase,
       formatInCurrency,
       formatConvertedBase,
+      tenantsTabHint,
+      setTenantsTabHint,
+      openLeadsHub,
       activeCompanyId,
       setActiveCompanyId,
       wsStatus,
@@ -601,6 +726,9 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       toggleOfflineSimulation,
       offlineQueue,
       syncOfflineQueue,
+      runFullSync,
+      lastSyncAt,
+      lastSyncResult,
       pendingMutationsCount,
       presence,
       toasts,
@@ -630,9 +758,13 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       baseCurrency,
       setBaseCurrency,
       currencyRates,
+      displayPrefs,
       convertToBase,
       formatInCurrency,
       formatConvertedBase,
+      tenantsTabHint,
+      setTenantsTabHint,
+      openLeadsHub,
       activeCompanyId,
       wsStatus,
       isBrowserOnline,
@@ -640,6 +772,9 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       toggleOfflineSimulation,
       offlineQueue,
       syncOfflineQueue,
+      runFullSync,
+      lastSyncAt,
+      lastSyncResult,
       pendingMutationsCount,
       presence,
       toasts,

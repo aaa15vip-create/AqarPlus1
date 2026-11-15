@@ -1,0 +1,36 @@
+{
+  "updatedAt": "2026-11-15T18:22:49.205Z",
+  "count": 1,
+  "items": [
+    {
+      "id": "tkt-arch-1",
+      "ticketNumber": "MNT-2026-000",
+      "propertyId": "prop-1",
+      "unitId": "unit-101",
+      "tenantId": "ten-1",
+      "source": "المستأجر",
+      "category": "كهرباء",
+      "priority": "متوسط",
+      "title": "تبديل قاطع كهرباء المطبخ الرئيسي 32 أمبير",
+      "description": "فصل متكرر للقاطع عند تشغيل الفرن الكهربائي.",
+      "assignedTo": "usr-tech",
+      "vendorId": "vnd-2",
+      "scheduledDate": "2026-08-05",
+      "diagnosis": "ضعف نقاط التلامس في القاطع القديم وتم استبداله بقاطع شنايدر أصلي",
+      "estimatedCost": 300,
+      "actualCost": 260,
+      "status": "مغلق",
+      "rating": 5,
+      "beforeNote": "لوحة التوزيع تظهر سخونة في القاطع رقم 4",
+      "afterNote": "تم التركيب واختبار الأحمال بنجاح خلال 45 دقيقة",
+      "createdBy": "usr-sup",
+      "createdAt": "2026-08-04T10:00:00.000Z",
+      "updatedAt": "2026-08-05T12:15:00.000Z",
+      "archivedAt": "2026-08-06T09:00:00.000Z",
+      "archiveReason": "بلاغ منجز ومغلق بتقييم 5/5",
+      "archivedBy": "usr-sup",
+      "archiveMode": "تلقائي",
+      "preArchiveStatus": "قيد التنفيذ"
+    }
+  ]
+}

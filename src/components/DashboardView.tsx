@@ -13,9 +13,10 @@ import {
   CalendarCheck,
   ListTodo,
   Plus,
+  Send,
 } from 'lucide-react';
 import { useAqar } from '../context/AqarContext';
-import { formatCurrency, formatDateTime, formatGregorian, formatHijri } from '../utils/formatters';
+import { formatCurrency, formatDateTime, formatDisplayDate } from '../utils/formatters';
 import { triggerHaptic } from '../utils/haptics';
 import { ReceiptModal } from './ReceiptModal';
 import { Payment, TaskItem } from '../types/aqar';
@@ -25,7 +26,6 @@ import {
   useDashboardAlerts,
 } from './DashboardAlertsOverlay';
 import { PropertyAnalyticsPanel } from './PropertyAnalyticsPanel';
-import { PrintViewButton } from './PrintViewButton';
 
 const DISMISSED_ALERTS_KEY = 'aqarplus_dismissed_alerts_v1';
 
@@ -41,6 +41,8 @@ export function DashboardView() {
     baseCurrency,
     convertToBase,
     formatInCurrency,
+    displayPrefs,
+    openLeadsHub,
   } = useAqar();
   const [selectedReceipt, setSelectedReceipt] = useState<Payment | null>(null);
   const [alertsOverlayOpen, setAlertsOverlayOpen] = useState(false);
@@ -113,7 +115,10 @@ export function DashboardView() {
   if (!state || !currentUser || !metrics) return null;
 
   const role = currentUser.role;
-  const todayHijri = formatHijri(new Date().toISOString());
+  const todayDisplay = formatDisplayDate(new Date().toISOString(), lang, {
+    ...displayPrefs,
+    verboseHijri: true,
+  });
 
   const handleExpenseDecision = async (expenseId: string, decision: 'approve' | 'reject') => {
     triggerHaptic(decision === 'approve' ? 'success' : 'warning');
@@ -171,6 +176,7 @@ export function DashboardView() {
   const contractAlertCount = activeAlerts.filter((a) => a.category === 'contracts').length;
   const maintAlertCount = activeAlerts.filter((a) => a.category === 'maintenance').length;
   const criticalCount = activeAlerts.filter((a) => a.severity === 'critical').length;
+  const pendingEscalationsCount = (state?.leadEscalations || []).filter((e) => e.status === 'بانتظار الموافقة').length;
 
   const openAlerts = (cat: AlertCategory = 'all') => {
     setAlertsCategory(cat);
@@ -197,7 +203,7 @@ export function DashboardView() {
         <div>
           <div className="text-xs text-slate-500 dark:text-slate-400">
             {lang === 'ar' ? currentUser.roleLabelAr : currentUser.roleLabelEn} · {currentUser.deviceName} ·{' '}
-            <span className="font-mono-num">{todayHijri}</span>
+            <span className="font-mono-num">{todayDisplay}</span>
           </div>
           <h2 className="text-xl lg:text-2xl font-bold mt-1">
             {lang === 'ar' ? `مرحباً، ${currentUser.nameAr}` : `Welcome, ${currentUser.nameEn}`}
@@ -205,7 +211,6 @@ export function DashboardView() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 no-print">
-          <PrintViewButton />
           <button
             onClick={() => openAlerts('all')}
             className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
@@ -237,6 +242,27 @@ export function DashboardView() {
               <span>{lang === 'ar' ? 'بلاغات الصيانة' : 'Maintenance'}</span>
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => openLeadsHub()}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Send className="w-3.5 h-3.5" />
+            <span>
+              {currentUser?.role === 'owner'
+                ? lang === 'ar'
+                  ? 'طلبات اعتماد المهتمين'
+                  : 'Lead Approvals'
+                : lang === 'ar'
+                ? 'إرسال بيانات مهتم للمالك/المسؤول'
+                : 'Escalate Lead to Owner'}
+            </span>
+            {pendingEscalationsCount > 0 && (
+              <span className="font-mono-num font-bold text-amber-600 dark:text-amber-300">
+                ({pendingEscalationsCount})
+              </span>
+            )}
+          </button>
         </div>
       </div>
 
@@ -609,7 +635,7 @@ export function DashboardView() {
                                 {lang === 'ar' ? `وحدة ${unit?.unitNumber || ''}` : `Unit ${unit?.unitNumber || ''}`} · قسط #{inst.installmentNumber}
                               </div>
                             </td>
-                            <td className="py-3 px-4 font-mono-num">{formatGregorian(inst.dueDate, lang)}</td>
+                            <td className="py-3 px-4 font-mono-num">{formatDisplayDate(inst.dueDate, lang, displayPrefs)}</td>
                             <td className="py-3 px-4 font-mono-num font-semibold text-amber-600 dark:text-amber-400">
                               {formatInCurrency(inst.remainingAmount, inst.currency || 'SAR')}
                             </td>

@@ -1,0 +1,59 @@
+{
+  "updatedAt": "2026-11-15T18:22:49.205Z",
+  "count": 2,
+  "items": [
+    {
+      "id": "ten-arch-1",
+      "nameAr": "خالد بن سعود العليان",
+      "nameEn": "Khalid Al-Olayan",
+      "nationalIdOrIqama": "1055667788",
+      "nationality": "سعودي",
+      "phone": "0557711223",
+      "email": "khalid.olayan@gmail.com",
+      "employer": "شركة سابك للتقنية",
+      "tenantType": "فرد",
+      "maritalStatus": "أعزب",
+      "classification": "سابق",
+      "rating": 5,
+      "behaviorScores": {
+        "paymentCommitment": 5,
+        "unitCare": 5,
+        "cooperation": 5,
+        "penaltyTotal": 0
+      },
+      "notes": "سدد جميع الأقساط قبل موعدها وأسلم الوحدة R-401 بحالة ممتازة",
+      "createdAt": "2024-10-01T08:00:00.000Z",
+      "archivedAt": "2026-09-15T14:00:00.000Z",
+      "archiveReason": "انتهاء مدة العقد والإخلاء النظامي بنجاح",
+      "archivedBy": "usr-lease",
+      "archiveMode": "تلقائي",
+      "preArchiveStatus": "نشط"
+    },
+    {
+      "id": "ten-arch-2",
+      "nameAr": "مؤسسة أفق الرياض للاستشارات",
+      "nameEn": "Ofoq Riyadh Consulting Est.",
+      "nationalIdOrIqama": "7008822114",
+      "nationality": "كيان تجاري سعودي",
+      "phone": "0508822199",
+      "email": "admin@ofoq-sa.com",
+      "employer": "سجل تجاري 1010449922",
+      "tenantType": "شركة",
+      "classification": "سابق",
+      "rating": 2,
+      "behaviorScores": {
+        "paymentCommitment": 2,
+        "unitCare": 3,
+        "cooperation": 2,
+        "penaltyTotal": 1200
+      },
+      "notes": "تأخر متكرر في القسط الأخير وتمت تسوية الإخلاء مع خصم الصيانة من التأمين",
+      "createdAt": "2024-11-15T09:00:00.000Z",
+      "archivedAt": "2025-12-20T16:10:00.000Z",
+      "archiveReason": "إخلاء بعد انتهاء العقد التجاري مع ملاحظات تأخر سداد",
+      "archivedBy": "usr-acc",
+      "archiveMode": "تلقائي",
+      "preArchiveStatus": "نشط"
+    }
+  ]
+}

@@ -217,15 +217,30 @@ export interface Owner {
   notes?: string;
 }
 
+export interface VendorRatingBreakdown {
+  quality: number;
+  punctuality: number;
+  pricing: number;
+  cooperation: number;
+}
+
 export interface Vendor {
   id: string;
   nameAr: string;
   nameEn: string;
   crNumber: string;
+  vatNumber?: string;
   category: string;
+  city?: string;
+  nationalAddress?: string;
+  iban?: string;
+  contactPerson?: string;
   phone: string;
   email: string;
   rating: number;
+  ratingBreakdown?: VendorRatingBreakdown;
+  avgExecutionDays?: number;
+  complaintsCount?: number;
   active: boolean;
 }
 
@@ -238,6 +253,25 @@ export interface TenantOnboardingChecklist {
   handoverSigned: boolean;
 }
 
+export type TenantTypeKind = 'فرد' | 'عائلة' | 'شركة';
+export type MaritalStatusKind = 'أعزب' | 'متزوج' | 'أرمل';
+
+export interface TenantBehaviorScores {
+  paymentCommitment: number;
+  unitCare: number;
+  cooperation: number;
+  penaltyTotal?: number;
+}
+
+export interface TenantViolationNote {
+  id: string;
+  title: string;
+  category: 'مخالفة' | 'ملاحظة' | 'تأخر سداد' | 'إشادة';
+  details: string;
+  createdBy: string;
+  createdAt: string;
+}
+
 export interface Tenant {
   id: string;
   nameAr: string;
@@ -248,8 +282,17 @@ export interface Tenant {
   altPhone?: string;
   email: string;
   employer?: string;
+  tenantType?: TenantTypeKind;
+  birthDate?: string;
+  maritalStatus?: MaritalStatusKind;
+  familyMembersCount?: number;
+  emergencyContactName?: string;
+  emergencyContactPhone?: string;
+  nationalAddress?: string;
   classification: 'نشط' | 'سابق' | 'محتمل';
   rating: number;
+  behaviorScores?: TenantBehaviorScores;
+  violationNotes?: TenantViolationNote[];
   onboardingChecklist?: TenantOnboardingChecklist;
   notes?: string;
   createdAt: string;
@@ -260,19 +303,97 @@ export interface Tenant {
   preArchiveStatus?: string;
 }
 
+export type LeadApprovalState = 'لم يُرسل' | 'بانتظار الموافقة' | 'موافق' | 'مرفوض' | 'مطلوب تعديلات';
+export type LeadEscalationChannel = 'داخلي' | 'واتساب' | 'بريد إلكتروني' | 'SMS';
+export type LeadEscalationStatus = 'بانتظار الموافقة' | 'موافق' | 'مرفوض' | 'أريد تعديلات';
+
+export interface LeadInteraction {
+  id: string;
+  type: 'call' | 'whatsapp' | 'email' | 'visit' | 'sms' | 'escalation' | 'decision';
+  direction: 'inbound' | 'outbound';
+  summary: string;
+  actorName: string;
+  createdAt: string;
+}
+
+export interface LeadEscalationSnapshot {
+  companyName: string;
+  propertyName: string;
+  unitNumber: string;
+  leadName: string;
+  nationalIdOrIqama?: string;
+  hasIdPhoto: boolean;
+  idImageDataUrl?: string;
+  birthDate?: string;
+  phone: string;
+  rentAmount: number;
+  paymentFrequency: PaymentFrequency;
+  officeFee: number;
+  earlyTerminationFee: number;
+  employeeNotes?: string;
+  registrationDate: string;
+  registrationSource: string;
+}
+
+export interface LeadEscalation {
+  id: string;
+  requestCode: string;
+  leadId: string;
+  propertyId: string;
+  unitId: string;
+  recipientType: 'internal' | 'owner';
+  recipientId: string;
+  recipientName: string;
+  recipientPhone?: string;
+  recipientEmail?: string;
+  channel: LeadEscalationChannel;
+  status: LeadEscalationStatus;
+  priority: 'عادي' | 'عاجل';
+  employeeNotes?: string;
+  decisionNotes?: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  token: string;
+  tokenExpiresAt: string;
+  snapshot: LeadEscalationSnapshot;
+  createdBy: string;
+  createdByName: string;
+  createdAt: string;
+}
+
 export interface Lead {
   id: string;
   nameAr: string;
   phone: string;
+  email?: string;
+  nationalIdOrIqama?: string;
+  idImageDataUrl?: string;
+  birthDate?: string;
+  tenantType?: TenantTypeKind;
+  familyMembersCount?: number;
+  companyCrNumber?: string;
   source: string;
   propertyId: string;
   unitId: string;
   offeredRent: number;
+  paymentFrequency?: PaymentFrequency;
+  officeFee?: number;
+  earlyTerminationFee?: number;
+  budgetMonthly?: number;
+  roomsRequired?: number;
+  preferredArea?: string;
+  moveInDate?: string;
   viewingDate: string;
   viewingResult?: string;
   status: 'جديد' | 'تمت المعاينة' | 'عرض سعر' | 'تحويل لعقد' | 'ملغي';
+  approvalState?: LeadApprovalState;
+  rating?: number;
   assignedTo: string;
   notes?: string;
+  convertedToTenantId?: string;
+  interactions?: LeadInteraction[];
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export type ContractLifecycleStatus =
@@ -306,6 +427,13 @@ export interface LeaseContract {
   installmentsCount: number;
   securityDeposit: number;
   officeFee: number;
+  earlyTerminationFee?: number;
+  ejarPortalUrl?: string;
+  handoverDate?: string;
+  occupancyStartDate?: string;
+  occupancyStatus?: 'نشط' | 'قيد الإخلاء' | 'مُخلى';
+  keysDeliveredCount?: number;
+  remotesDeliveredCount?: number;
   managementCommissionPercent: number;
   includedServices: string;
   version: number;
@@ -332,7 +460,7 @@ export interface HandoverInspection {
   contractId: string;
   unitId: string;
   propertyId: string;
-  type: 'استلام عند التأجير' | 'إخلاء واستلام';
+  type: 'استلام عند التأجير' | 'إخلاء واستلام' | 'استلام أثناء الإشغال';
   date: string;
   inspectorId: string;
   keysReturned: number;
@@ -344,6 +472,9 @@ export interface HandoverInspection {
   unpaidRentDue: number;
   depositHeld: number;
   netRefundOrDue: number;
+  photosDataUrls?: string[];
+  tenantSignatureDataUrl?: string;
+  notes?: string;
   approvedBy?: string;
   status: 'مسودة' | 'بانتظار الاعتماد' | 'معتمد';
   createdAt: string;
@@ -439,30 +570,155 @@ export interface JournalEntry {
   lines: JournalLine[];
 }
 
-export type ExpenseCategory = 'صيانة' | 'نظافة' | 'كهرباء' | 'مياه' | 'تشغيل عام' | 'أصول ومعدات';
-export type ExpenseApprovalStatus = 'بانتظار المشرف' | 'بانتظار المدير' | 'معتمد' | 'مرفوض';
+export type ExpenseCategory =
+  | 'صيانة'
+  | 'نظافة'
+  | 'كهرباء'
+  | 'مياه'
+  | 'تشغيل عام'
+  | 'أصول ومعدات'
+  | 'مصروفات الصيانة'
+  | 'مصروفات التشغيل'
+  | 'مصروفات إدارية'
+  | 'مصروفات رأس مالية'
+  | 'مصروفات تأجير وتسويق'
+  | 'مصروفات حكومية وضريبية'
+  | 'مصروفات طوارئ'
+  | 'مصروفات أخرى';
+
+export type ExpenseApprovalStatus =
+  | 'مسودة'
+  | 'بانتظار المشرف'
+  | 'بانتظار مدير القسم'
+  | 'بانتظار المدير'
+  | 'بانتظار المالك'
+  | 'معتمد'
+  | 'مرفوض'
+  | 'ملغى';
+
+export type ExpensePaymentStatus = 'مدفوع بالكامل' | 'مدفوع جزئياً' | 'لم يُدفع';
 
 export interface Expense {
   id: string;
   expenseNumber: string;
   date: string;
   category: ExpenseCategory;
+  subCategory?: string;
   propertyId: string;
   unitId?: string;
   vendorId?: string;
   ticketId?: string;
+  tenantId?: string;
   invoiceNumber: string;
   amount: number;
+  vatAmount?: number;
+  netAmount?: number;
   currency?: CurrencyCode;
-  paymentMethod: PaymentMethod;
+  paymentMethod: PaymentMethod | 'آجل';
+  paidFromAccount?: string;
+  referenceNumber?: string;
+  paymentStatus?: ExpensePaymentStatus;
+  paidAmount?: number;
+  remainingAmount?: number;
+  dueDate?: string;
   bearer: 'المالك' | 'الشركة' | 'المستأجر';
   approvalStatus: ExpenseApprovalStatus;
   approvedBySupervisor?: string;
+  approvedByDeptManager?: string;
   approvedByManager?: string;
+  approvedByOwner?: string;
   rejectionReason?: string;
+  cancellationReason?: string;
+  invoiceImageDataUrl?: string;
+  invoicePdfDataUrl?: string;
+  workPhotosDataUrls?: string[];
+  recipientSignatureDataUrl?: string;
+  zatcaQrVerified?: boolean;
+  zatcaQrRaw?: string;
+  registerAsAsset?: boolean;
+  isRecurringInstance?: boolean;
+  recurringRuleId?: string;
   createdBy: string;
   notes?: string;
   createdAt: string;
+}
+
+export interface SupplierInvoiceLineItem {
+  id: string;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+}
+
+export type SupplierInvoiceStatus =
+  | 'مسودة'
+  | 'بانتظار الاعتماد'
+  | 'معتمدة'
+  | 'مدفوعة جزئياً'
+  | 'مدفوعة بالكامل'
+  | 'متأخرة'
+  | 'ملغاة';
+
+export interface SupplierInvoice {
+  id: string;
+  invoiceCode: string;
+  supplierInvoiceNumber: string;
+  invoiceDate: string;
+  receivedDate: string;
+  dueDate?: string;
+  vendorId: string;
+  propertyId: string;
+  unitId?: string;
+  ticketId?: string;
+  items: SupplierInvoiceLineItem[];
+  subtotal: number;
+  vatAmount: number;
+  totalAmount: number;
+  paidAmount: number;
+  remainingAmount: number;
+  currency: CurrencyCode;
+  status: SupplierInvoiceStatus;
+  cancellationReason?: string;
+  zatcaQrVerified?: boolean;
+  zatcaQrData?: string;
+  invoiceImageDataUrl?: string;
+  invoicePdfDataUrl?: string;
+  beforeAfterPhotos?: string[];
+  notes?: string;
+  createdBy: string;
+  approvedBy?: string;
+  createdAt: string;
+}
+
+export interface RecurringExpenseRule {
+  id: string;
+  title: string;
+  category: ExpenseCategory;
+  subCategory?: string;
+  propertyId: string;
+  unitId?: string;
+  vendorId?: string;
+  estimatedAmount: number;
+  currency: CurrencyCode;
+  bearer: 'المالك' | 'الشركة' | 'المستأجر';
+  frequency: 'شهري' | 'ربع سنوي' | 'سنوي';
+  dayOfMonth: number;
+  enabled: boolean;
+  lastGeneratedMonth?: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface PropertyBudget {
+  id: string;
+  propertyId: string;
+  month: string;
+  monthlyLimitSar: number;
+  alertThresholdPercent: number;
+  blockAt100Percent: boolean;
+  updatedBy: string;
+  updatedAt: string;
 }
 
 export interface UnitAsset {
@@ -573,12 +829,14 @@ export interface CommunicationLog {
   targetType: 'مستأجر' | 'مالك' | 'مورد' | 'موظف';
   targetId: string;
   targetName: string;
-  channel: 'اتصال هاتفي' | 'رسالة نصية / واتساب' | 'بريد إلكتروني' | 'ملاحظة داخلية';
+  channel: 'اتصال هاتفي' | 'رسالة نصية / واتساب' | 'بريد إلكتروني' | 'ملاحظة داخلية' | 'زيارة ميدانية' | 'موعد مجدول';
+  direction?: 'صادر' | 'وارد';
   templateId?: string;
   templateUsed?: string;
   language: 'ar' | 'en' | 'bn';
   summary: string;
-  status?: 'مرسل' | 'مقروء';
+  scheduledAt?: string;
+  status?: 'مرسل' | 'مقروء' | 'مجدول' | 'مكتمل';
   sentBy: string;
   createdAt: string;
 }
@@ -716,6 +974,7 @@ export interface DocumentRecord {
   version: number;
   uploadedBy: string;
   dataUrl?: string;
+  diskPath?: string;
   ocrStatus?: 'لم يُحلل' | 'تم الاستخراج آلياً';
   ocrRawText?: string;
   ocrExtracted?: OcrExtractedData;
@@ -975,6 +1234,12 @@ export interface NotificationCenterConfig {
     maintenanceId?: string;
     contractId?: string;
   };
+  emailEnabled?: boolean;
+  emailAddress?: string;
+  emailReportTypes?: string[];
+  defaultWhatsappNumber?: string;
+  defaultSmsNumber?: string;
+  defaultEmailSender?: string;
 }
 
 export interface DiscoveredPrinter {
@@ -1001,6 +1266,8 @@ export interface BackupPolicyConfig {
   scheduledTime: string;
   storageTarget: 'device' | 'custom_folder' | 'nas' | 'cloud';
   customPath: string;
+  archivePath?: string;
+  documentsPath?: string;
   encryptBackups: boolean;
 }
 
@@ -1024,6 +1291,104 @@ export interface DeveloperErrorEntry {
 export interface DeveloperCenterConfig {
   tempCacheSizeKb: number;
   errorLogs: DeveloperErrorEntry[];
+}
+
+export interface HolidayEntry {
+  id: string;
+  nameAr: string;
+  date: string;
+  official: boolean;
+}
+
+export interface CalendarSettingsConfig {
+  calendarType: 'gregorian' | 'hijri' | 'both';
+  dateFormat: 'DD/MM/YYYY' | 'YYYY-MM-DD';
+  numerals: 'ar' | 'en';
+  weekStart: 'sat' | 'sun' | 'mon';
+  holidays: HolidayEntry[];
+  disableWorkOnHolidays: boolean;
+  workStart: string;
+  workEnd: string;
+  workDays: string[];
+  ramadanMode: boolean;
+  ramadanWorkStart: string;
+  ramadanWorkEnd: string;
+  rentAlertDays: number[];
+  contractAlertDays: number[];
+}
+
+export interface CustomFormFieldConfig {
+  id: string;
+  key: string;
+  labelAr: string;
+  labelEn: string;
+  type: 'text' | 'number' | 'date' | 'select' | 'checkbox';
+  visible: boolean;
+  required: boolean;
+  isCustom?: boolean;
+}
+
+export interface FormsCustomizationConfig {
+  tenantForm: CustomFormFieldConfig[];
+  expenseForm: CustomFormFieldConfig[];
+  ticketForm: CustomFormFieldConfig[];
+  handoverChecklist: { id: string; labelAr: string; visible: boolean; required: boolean }[];
+  customForms: { id: string; titleAr: string; linkedModule: string; fieldsCount: number; active: boolean }[];
+}
+
+export interface CatalogCategoryItem {
+  id: string;
+  nameAr: string;
+  nameEn: string;
+  description?: string;
+  icon?: string;
+  color?: string;
+  accountCode?: string;
+  vatTaxable?: boolean;
+  active: boolean;
+  subCategories?: string[];
+  minUnits?: number;
+  defaultVatPercent?: number;
+  defaultUsage?: string;
+  minArea?: number;
+  maxArea?: number;
+  defaultRooms?: number;
+  defaultBathrooms?: number;
+  defaultAmenities?: string[];
+  defaultRentCycle?: 'شهري' | 'سنوي';
+  linkedBankName?: string;
+  linkedIban?: string;
+  feePercent?: number;
+  minAmount?: number;
+  maxAmount?: number;
+  termType?: 'قصير الأمد' | 'طويل الأمد';
+}
+
+export interface LiabilityRecordItem {
+  id: string;
+  titleAr: string;
+  categoryId: string;
+  creditor: string;
+  termType: 'قصير الأمد' | 'طويل الأمد';
+  interestPercent: number;
+  totalAmount: number;
+  paidAmount: number;
+  dueDate: string;
+  accountCode: string;
+  notes?: string;
+}
+
+export interface DirectoryContactItem {
+  id: string;
+  name: string;
+  phone: string;
+  email?: string;
+  category: 'مستأجر' | 'مورد' | 'مالك' | 'أخرى';
+  company?: string;
+  notes?: string;
+  archived?: boolean;
+  source: 'system' | 'phone' | 'csv' | 'ejar' | 'manual';
+  createdAt: string;
 }
 
 export interface CompanySettings {
@@ -1056,6 +1421,121 @@ export interface CompanySettings {
   backupPolicy?: BackupPolicyConfig;
   syncCenter?: SyncCenterConfig;
   developerCenter?: DeveloperCenterConfig;
+  calendarConfig?: CalendarSettingsConfig;
+  formsConfig?: FormsCustomizationConfig;
+  incomeCategories?: CatalogCategoryItem[];
+  expenseCategories?: CatalogCategoryItem[];
+  liabilityCategories?: CatalogCategoryItem[];
+  liabilityRecords?: LiabilityRecordItem[];
+  paymentMethodsConfig?: CatalogCategoryItem[];
+  propertyTypesConfig?: CatalogCategoryItem[];
+  unitTypesConfig?: CatalogCategoryItem[];
+  contactsDirectory?: DirectoryContactItem[];
+  contactsAutoSync?: boolean;
+  integrationsConfig?: IntegrationsConfig;
+}
+
+export interface IntegrationsConfig {
+  whatsappBusinessEnabled: boolean;
+  whatsappPhoneId?: string;
+  smtpEnabled: boolean;
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpSenderEmail?: string;
+  smtpUseTls?: boolean;
+  smsGatewayEnabled: boolean;
+  smsProviderName?: string;
+  smsSenderId?: string;
+  mapProvider: 'osm' | 'google_maps';
+  googleMapsLinked?: boolean;
+}
+
+export interface FavoriteReportPreset {
+  id: string;
+  title: string;
+  dataset: 'payments' | 'installments' | 'expenses' | 'units' | 'maintenance';
+  fields: string[];
+  propertyFilter: string;
+  statusFilter: string;
+  groupBy: 'none' | 'property' | 'status' | 'month';
+  sortField: string;
+  sortDir: 'asc' | 'desc';
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface SharedSearchFilter {
+  id: string;
+  name: string;
+  query: string;
+  entityType: 'all' | 'property' | 'unit' | 'tenant' | 'contract' | 'payment' | 'expense' | 'task' | 'ticket' | 'document';
+  propertyId: string;
+  onlyOverdue: boolean;
+  minAmount: number;
+  isFavorite: boolean;
+  isShared: boolean;
+  createdBy: string;
+  createdByName: string;
+  createdAt: string;
+}
+
+export interface MeterReading {
+  id: string;
+  readingNumber: string;
+  propertyId: string;
+  unitId?: string;
+  meterType: 'كهرباء' | 'مياه';
+  meterNumber: string;
+  previousReading: number;
+  currentReading: number;
+  consumption: number;
+  billAmount: number;
+  currency: CurrencyCode;
+  billingPeriod: string;
+  paidBy?: 'المستأجر' | 'المالك' | 'الشركة';
+  recordedBy: string;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface ScheduledReportConfig {
+  id: string;
+  title: string;
+  dataset: 'payments' | 'installments' | 'expenses' | 'units' | 'maintenance';
+  frequency: 'يومي' | 'أسبوعي' | 'شهري';
+  deliveryChannel: 'بريد إلكتروني' | 'واتساب' | 'إشعار داخلي';
+  recipient: string;
+  fields: string[];
+  groupBy?: 'none' | 'property' | 'status' | 'month';
+  enabled: boolean;
+  lastRunAt?: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface ZatcaInvoiceRecord {
+  id: string;
+  invoiceNumber: string;
+  invoiceType: 'فاتورة ضريبية (B2B)' | 'فاتورة ضريبية مبسطة (B2C)' | 'إشعار دائن';
+  issueDate: string;
+  sellerName: string;
+  vatNumber: string;
+  buyerName: string;
+  buyerVatNumber?: string;
+  propertyId?: string;
+  unitId?: string;
+  relatedPaymentId?: string;
+  subtotal: number;
+  vatRate: number;
+  vatAmount: number;
+  totalWithVat: number;
+  currency: CurrencyCode;
+  tlvBase64: string;
+  invoiceHash: string;
+  clearanceStatus: 'مؤرشف (المرحلة 1)' | 'تم الربط والتحقق (المرحلة 2)' | 'معلق';
+  notes?: string;
+  createdBy: string;
+  createdAt: string;
 }
 
 export interface AqarDatabaseState {
@@ -1065,10 +1545,12 @@ export interface AqarDatabaseState {
   rolePermissions: Record<RoleKey, PermissionKey[]>;
   properties: Property[];
   units: Unit[];
+  meterReadings?: MeterReading[];
   owners: Owner[];
   vendors: Vendor[];
   tenants: Tenant[];
   leads: Lead[];
+  leadEscalations?: LeadEscalation[];
   contracts: LeaseContract[];
   handovers: HandoverInspection[];
   installments: Installment[];
@@ -1076,6 +1558,9 @@ export interface AqarDatabaseState {
   accounts: Account[];
   journals: JournalEntry[];
   expenses: Expense[];
+  supplierInvoices?: SupplierInvoice[];
+  recurringExpenses?: RecurringExpenseRule[];
+  propertyBudgets?: PropertyBudget[];
   assets: UnitAsset[];
   tickets: MaintenanceTicket[];
   tasks: TaskItem[];
@@ -1102,8 +1587,13 @@ export interface AqarDatabaseState {
   securityPolicy?: SecurityPolicy;
   loginHistory?: LoginAuditEntry[];
   syncConflicts?: SyncConflictRecord[];
+  scheduledReports?: ScheduledReportConfig[];
+  favoriteReports?: FavoriteReportPreset[];
+  sharedSearchFilters?: SharedSearchFilter[];
+  zatcaInvoices?: ZatcaInvoiceRecord[];
   communicationTemplates?: CommunicationTemplate[];
   teamSeeded?: boolean;
+  syncRevision?: number;
   lastUpdatedAt: string;
 }
 

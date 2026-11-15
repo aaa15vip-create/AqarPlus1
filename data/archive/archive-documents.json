@@ -1,0 +1,64 @@
+{
+  "updatedAt": "2026-11-15T18:22:49.205Z",
+  "count": 2,
+  "items": [
+    {
+      "id": "doc-arch-1",
+      "title": "هوية وطنية منتهية الصلاحية - خالد العليان (R-401)",
+      "category": "هويات وإقامات",
+      "fileName": "id-1055667788-expired.pdf",
+      "fileType": "PDF",
+      "fileSizeKb": 380,
+      "relatedType": "مستأجر",
+      "relatedId": "ten-arch-1",
+      "expiryDate": "2026-06-30",
+      "version": 1,
+      "uploadedBy": "usr-lease",
+      "ocrStatus": "تم الاستخراج آلياً",
+      "ocrExtracted": {
+        "docType": "هوية / إقامة",
+        "tenantNameAr": "خالد بن سعود العليان",
+        "nationalIdOrIqama": "1055667788",
+        "nationality": "سعودي",
+        "expiryDate": "2026-06-30",
+        "rawText": "هوية وطنية - خالد بن سعود العليان - انتهت في 2026-06-30"
+      },
+      "accessLog": [],
+      "createdAt": "2025-09-10T09:40:00.000Z",
+      "archivedAt": "2026-07-01T02:00:00.000Z",
+      "archiveReason": "انتهاء صلاحية الوثيقة (مشفرة للأغراض القانونية)",
+      "archivedBy": "usr-gm",
+      "archiveMode": "مجدول",
+      "preArchiveStatus": "نشط"
+    },
+    {
+      "id": "doc-arch-2",
+      "title": "نسخة عقد إيجار 2025 - مؤسسة أفق الرياض (M-108)",
+      "category": "عقود إيجار",
+      "fileName": "ejar-EJ-1046552211.pdf",
+      "fileType": "PDF",
+      "fileSizeKb": 910,
+      "relatedType": "عقد",
+      "relatedId": "ctr-arch-2",
+      "expiryDate": "2025-12-19",
+      "version": 1,
+      "uploadedBy": "usr-lease",
+      "ocrStatus": "تم الاستخراج آلياً",
+      "ocrExtracted": {
+        "docType": "عقد إيجار",
+        "tenantNameAr": "مؤسسة أفق الرياض للاستشارات",
+        "ejarNumber": "EJ-1046552211",
+        "unitNumber": "M-108",
+        "annualRent": 38400,
+        "rawText": "عقد إيجار موحد EJ-1046552211 - انتهى في 2025-12-19"
+      },
+      "accessLog": [],
+      "createdAt": "2024-12-15T10:00:00.000Z",
+      "archivedAt": "2025-12-21T02:00:00.000Z",
+      "archiveReason": "وثيقة عقد منتهي الصلاحية",
+      "archivedBy": "usr-lease",
+      "archiveMode": "تلقائي",
+      "preArchiveStatus": "نشط"
+    }
+  ]
+}
