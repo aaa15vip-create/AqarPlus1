@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
+  Building2,
   Delete,
   Eye,
   EyeOff,
@@ -19,22 +20,44 @@ export function AuthLoginScreen() {
   const {
     lang,
     setLang,
+    workspaceId,
     companyBranding,
     demoLoginEnabled,
     loginProfiles,
     loginWithPassword,
     loginWithPin,
+    provisionWorkspace,
   } = useAqar();
 
   const isAr = lang === 'ar';
-  const [mode, setMode] = useState<'password' | 'pin'>('password');
-  const [identifier, setIdentifier] = useState('owner.sys@aqarplus.sa');
+  const [mode, setMode] = useState<'password' | 'pin' | 'provision'>('password');
+  const [wsSlugInput, setWsSlugInput] = useState(workspaceId || 'default');
+  const [identifier, setIdentifier] = useState(demoLoginEnabled ? 'owner.sys@aqarplus.sa' : '');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [selectedUserId, setSelectedUserId] = useState(loginProfiles[0]?.id || 'usr-sys');
+  const [selectedUserId, setSelectedUserId] = useState(loginProfiles[0]?.id || '');
+  const [pinIdentifier, setPinIdentifier] = useState('');
   const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+
+  // Provision workspace fields
+  const [newSlug, setNewSlug] = useState('');
+  const [newCompanyAr, setNewCompanyAr] = useState('');
+  const [newAdminName, setNewAdminName] = useState('');
+  const [newAdminEmail, setNewAdminEmail] = useState('');
+  const [newAdminPhone, setNewAdminPhone] = useState('');
+  const [newAdminPassword, setNewAdminPassword] = useState('');
+  const [newAdminPin, setNewAdminPin] = useState('');
+
+  useEffect(() => {
+    if (demoLoginEnabled && !identifier) {
+      setIdentifier('owner.sys@aqarplus.sa');
+    }
+    if (loginProfiles.length > 0 && !selectedUserId) {
+      setSelectedUserId(loginProfiles[0].id);
+    }
+  }, [demoLoginEnabled, identifier, loginProfiles, selectedUserId]);
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -44,7 +67,7 @@ export function AuthLoginScreen() {
     }
     setBusy(true);
     setErrorMsg('');
-    const result = await loginWithPassword(identifier.trim(), password);
+    const result = await loginWithPassword(identifier.trim(), password, wsSlugInput.trim() || 'default');
     setBusy(false);
     if (!result.ok) {
       setErrorMsg(result.error || (isAr ? 'بيانات الدخول غير صحيحة' : 'Invalid credentials'));
@@ -53,17 +76,53 @@ export function AuthLoginScreen() {
 
   const handlePinSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
+    const targetId = loginProfiles.length > 0 ? selectedUserId : pinIdentifier.trim();
+    if (!targetId) {
+      setErrorMsg(isAr ? 'أدخل البريد الإلكتروني أو معرّف المستخدم أولاً' : 'Enter your email or user ID');
+      return;
+    }
     if (pin.length < 4) {
       setErrorMsg(isAr ? 'أدخل رمز PIN مكون من 4 إلى 6 أرقام' : 'Enter 4-6 digit PIN');
       return;
     }
     setBusy(true);
     setErrorMsg('');
-    const result = await loginWithPin(selectedUserId || loginProfiles[0]?.id || 'usr-sys', pin);
+    const result = await loginWithPin(targetId, pin, wsSlugInput.trim() || 'default');
     setBusy(false);
     if (!result.ok) {
       setErrorMsg(result.error || (isAr ? 'رمز PIN غير صحيح' : 'Incorrect PIN'));
       setPin('');
+    }
+  };
+
+  const handleProvisionSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSlug.trim() || !newCompanyAr.trim() || !newAdminName.trim() || !newAdminEmail.trim()) {
+      setErrorMsg(isAr ? 'يرجى إكمال كافة الحقول المطلوبة' : 'Please fill all required fields');
+      return;
+    }
+    if (newAdminPassword.length < 8) {
+      setErrorMsg(isAr ? 'يجب أن تتكون كلمة المرور من 8 أحرف على الأقل' : 'Password must be at least 8 characters');
+      return;
+    }
+    if (newAdminPin && !/^\d{4,6}$/.test(newAdminPin)) {
+      setErrorMsg(isAr ? 'رمز PIN يجب أن يتكون من 4 إلى 6 أرقام' : 'PIN must be 4-6 digits');
+      return;
+    }
+    setBusy(true);
+    setErrorMsg('');
+    const result = await provisionWorkspace({
+      workspaceSlug: newSlug.trim().toLowerCase(),
+      companyNameAr: newCompanyAr.trim(),
+      adminNameAr: newAdminName.trim(),
+      adminEmail: newAdminEmail.trim(),
+      adminPhone: newAdminPhone.trim(),
+      password: newAdminPassword,
+      pin: newAdminPin.trim() || undefined,
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setErrorMsg(result.error || (isAr ? 'تعذر إنشاء مساحة عمل الشركة' : 'Failed to create company workspace'));
     }
   };
 
@@ -72,9 +131,9 @@ export function AuthLoginScreen() {
     setSelectedUserId(profileId);
     setBusy(true);
     setErrorMsg('');
-    const res = await loginWithPin(profileId, '1234');
+    const res = await loginWithPin(profileId, '1234', wsSlugInput.trim() || 'default');
     if (!res.ok) {
-      const pwRes = await loginWithPassword(email, 'Aqar@2026');
+      const pwRes = await loginWithPassword(email, 'Aqar@2026', wsSlugInput.trim() || 'default');
       if (!pwRes.ok) {
         setErrorMsg(
           isAr
@@ -106,7 +165,7 @@ export function AuthLoginScreen() {
 
       <div className="w-full max-w-4xl grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
         {/* Main Glass Auth Card */}
-        <div className="lg:col-span-7 rounded-3xl border border-white/15 bg-white/10 backdrop-blur-2xl text-white p-6 sm:p-8 shadow-2xl space-y-6 animate-aqar-fade-scale">
+        <div className="lg:col-span-7 rounded-3xl border border-white/15 bg-white/10 backdrop-blur-2xl text-white p-6 sm:p-8 shadow-2xl space-y-5 animate-aqar-fade-scale">
           <div className="flex items-center gap-3.5">
             <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-[#26478D] to-[#0A0E1A] border border-white/20 flex items-center justify-center overflow-hidden shadow-lg shrink-0">
               {companyBranding?.logoDataUrl ? (
@@ -135,26 +194,20 @@ export function AuthLoginScreen() {
             </div>
           </div>
 
-          <p className="text-xs sm:text-sm text-blue-100/85 leading-relaxed">
-            {isAr
-              ? 'أهلاً بك في عقار بلس.. جميع البيانات المالية والعقود محمية بجلسة مشفرة وصلاحيات دقيقة لكل دور وظيفي.'
-              : 'Welcome to AqarPlus. Financial data, contracts, and backups are protected with signed sessions and role-based access control.'}
-          </p>
-
           {/* Mode Tabs */}
-          <div className="grid grid-cols-2 gap-2 p-1 rounded-2xl bg-[#0A0E1A]/50 border border-white/10 text-xs">
+          <div className="grid grid-cols-3 gap-1.5 p-1 rounded-2xl bg-[#0A0E1A]/50 border border-white/10 text-xs">
             <button
               type="button"
               onClick={() => {
                 setMode('password');
                 setErrorMsg('');
               }}
-              className={`py-2.5 px-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer ${
+              className={`py-2.5 px-2 rounded-xl font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                 mode === 'password' ? 'bg-[#26478D] text-white shadow' : 'text-blue-100/75 hover:text-white'
               }`}
             >
-              <Mail className="w-3.5 h-3.5" />
-              <span>{isAr ? 'البريد وكلمة المرور' : 'Email & Password'}</span>
+              <Mail className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{isAr ? 'كلمة المرور' : 'Password'}</span>
             </button>
             <button
               type="button"
@@ -162,12 +215,25 @@ export function AuthLoginScreen() {
                 setMode('pin');
                 setErrorMsg('');
               }}
-              className={`py-2.5 px-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer ${
+              className={`py-2.5 px-2 rounded-xl font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                 mode === 'pin' ? 'bg-[#26478D] text-white shadow' : 'text-blue-100/75 hover:text-white'
               }`}
             >
-              <KeyRound className="w-3.5 h-3.5" />
-              <span>{isAr ? 'دخول سريع برمز PIN' : 'Quick PIN Login'}</span>
+              <KeyRound className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{isAr ? 'رمز PIN' : 'Quick PIN'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMode('provision');
+                setErrorMsg('');
+              }}
+              className={`py-2.5 px-2 rounded-xl font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                mode === 'provision' ? 'bg-emerald-600 text-white shadow' : 'text-blue-100/75 hover:text-white'
+              }`}
+            >
+              <Building2 className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{isAr ? 'شركة جديدة' : 'New Company'}</span>
             </button>
           </div>
 
@@ -177,8 +243,22 @@ export function AuthLoginScreen() {
             </div>
           )}
 
-          {mode === 'password' ? (
+          {mode === 'password' && (
             <form onSubmit={handlePasswordSubmit} className="space-y-4 text-xs">
+              <div>
+                <label className="block text-blue-100/90 mb-1.5 font-medium">
+                  {isAr ? 'معرّف الشركة / مساحة العمل (Workspace ID)' : 'Company Workspace ID'}
+                </label>
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={wsSlugInput}
+                  onChange={(e) => setWsSlugInput(e.target.value)}
+                  placeholder="default"
+                  className="w-full px-4 py-2.5 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono-num"
+                />
+              </div>
+
               <div>
                 <label className="block text-blue-100/90 mb-1.5 font-medium">
                   {isAr ? 'البريد الإلكتروني أو رقم الجوال' : 'Email or Phone'}
@@ -189,7 +269,7 @@ export function AuthLoginScreen() {
                   required
                   value={identifier}
                   onChange={(e) => setIdentifier(e.target.value)}
-                  placeholder="owner.sys@aqarplus.sa"
+                  placeholder="name@company.sa"
                   className="w-full px-4 py-3 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono-num"
                 />
               </div>
@@ -229,9 +309,25 @@ export function AuthLoginScreen() {
                 {isAr ? <ArrowLeft className="w-4 h-4" /> : <ArrowRight className="w-4 h-4" />}
               </button>
             </form>
-          ) : (
+          )}
+
+          {mode === 'pin' && (
             <form onSubmit={handlePinSubmit} className="space-y-4 text-xs">
-              {loginProfiles.length > 0 && (
+              <div>
+                <label className="block text-blue-100/90 mb-1.5 font-medium">
+                  {isAr ? 'معرّف الشركة (Workspace ID)' : 'Company Workspace ID'}
+                </label>
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={wsSlugInput}
+                  onChange={(e) => setWsSlugInput(e.target.value)}
+                  placeholder="default"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono-num"
+                />
+              </div>
+
+              {loginProfiles.length > 0 ? (
                 <div>
                   <label className="block text-blue-100/90 mb-1.5 font-medium">
                     {isAr ? 'الحساب المستهدف' : 'Select User Account'}
@@ -247,6 +343,21 @@ export function AuthLoginScreen() {
                       </option>
                     ))}
                   </select>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-blue-100/90 mb-1.5 font-medium">
+                    {isAr ? 'البريد الإلكتروني أو معرّف المستخدم' : 'Email or User ID'}
+                  </label>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    required
+                    value={pinIdentifier}
+                    onChange={(e) => setPinIdentifier(e.target.value)}
+                    placeholder="name@company.sa"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono-num"
+                  />
                 </div>
               )}
 
@@ -319,6 +430,120 @@ export function AuthLoginScreen() {
               </button>
             </form>
           )}
+
+          {mode === 'provision' && (
+            <form onSubmit={handleProvisionSubmit} className="space-y-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-blue-100/90 mb-1 font-medium">
+                    {isAr ? 'معرّف الشركة الفريد (إنجليزي)' : 'Company Workspace Slug'}
+                  </label>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    required
+                    value={newSlug}
+                    onChange={(e) => setNewSlug(e.target.value)}
+                    placeholder="alnoor-properties"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400 font-mono-num"
+                  />
+                </div>
+                <div>
+                  <label className="block text-blue-100/90 mb-1 font-medium">
+                    {isAr ? 'اسم الشركة / المكتب العقاري' : 'Company Name'}
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newCompanyAr}
+                    onChange={(e) => setNewCompanyAr(e.target.value)}
+                    placeholder={isAr ? 'شركة النور العقارية' : 'Al-Noor Properties'}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-blue-100/90 mb-1 font-medium">
+                    {isAr ? 'اسم مالك النظام' : 'Owner Full Name'}
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newAdminName}
+                    onChange={(e) => setNewAdminName(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                  />
+                </div>
+                <div>
+                  <label className="block text-blue-100/90 mb-1 font-medium">
+                    {isAr ? 'البريد الإلكتروني للمدير' : 'Owner Email'}
+                  </label>
+                  <input
+                    type="email"
+                    dir="ltr"
+                    required
+                    value={newAdminEmail}
+                    onChange={(e) => setNewAdminEmail(e.target.value)}
+                    placeholder="owner@company.sa"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400 font-mono-num"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-blue-100/90 mb-1 font-medium">
+                    {isAr ? 'كلمة مرور قوية (8+ أحرف)' : 'Strong Password (8+ chars)'}
+                  </label>
+                  <input
+                    type="password"
+                    dir="ltr"
+                    required
+                    minLength={8}
+                    value={newAdminPassword}
+                    onChange={(e) => setNewAdminPassword(e.target.value)}
+                    placeholder="••••••••••••"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                  />
+                </div>
+                <div>
+                  <label className="block text-blue-100/90 mb-1 font-medium">
+                    {isAr ? 'رقم الجوال + رمز PIN اختياري' : 'Phone / Optional 4-6 PIN'}
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      dir="ltr"
+                      value={newAdminPhone}
+                      onChange={(e) => setNewAdminPhone(e.target.value)}
+                      placeholder="05xxxxxxxx"
+                      className="w-full px-3 py-2.5 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white placeholder:text-slate-400 font-mono-num"
+                    />
+                    <input
+                      type="password"
+                      dir="ltr"
+                      maxLength={6}
+                      value={newAdminPin}
+                      onChange={(e) => setNewAdminPin(e.target.value)}
+                      placeholder="PIN"
+                      className="w-full px-3 py-2.5 rounded-xl border border-white/15 bg-[#0A0E1A]/55 text-white placeholder:text-slate-400 font-mono-num"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={busy}
+                className="w-full py-3.5 px-5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 disabled:opacity-60 font-bold text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg"
+              >
+                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Building2 className="w-4 h-4" />}
+                <span>{isAr ? 'تأسيس مساحة عمل معزولة للشركة' : 'Provision Isolated Company Workspace'}</span>
+              </button>
+            </form>
+          )}
         </div>
 
         {/* Team Profiles & Security Info Panel */}
@@ -326,20 +551,27 @@ export function AuthLoginScreen() {
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-xs font-bold text-emerald-300">
               <ShieldCheck className="w-4 h-4" />
-              <span>{isAr ? 'جلسة موثقة وصلاحيات معزولة' : 'Verified Sessions & Role Isolation'}</span>
+              <span>{isAr ? 'عزل الشركات والصلاحيات الموثقة' : 'Company & Role Isolation'}</span>
             </div>
             <p className="text-[11px] text-slate-300 leading-relaxed">
               {isAr
-                ? 'يتم التحقق من الجلسة في قاعدة البيانات المحلية (SQLite / Durable Objects) عبر توقيع HMAC-SHA256 وتجزئة كلمات المرور بخوارزمية scrypt.'
-                : 'Sessions are verified on the server database with HMAC-SHA256 signed tokens and salted scrypt password hashes.'}
+                ? 'تم عزل كل شركة في قاعدة بيانات SQLite مستقلة مع توقيع HMAC-SHA256 مرتبط بمعرّف الشركة، وحماية من محاولات التخمين، وتشفير النسخ الاحتياطية بـ AES-256-GCM.'
+                : 'Every company runs in an isolated SQLite store bound by HMAC-SHA256 workspace tokens, brute-force lockout protection, and AES-256-GCM encrypted backups.'}
             </p>
+            {!demoLoginEnabled && (
+              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-400/25 text-[11px] text-emerald-200 leading-relaxed">
+                {isAr
+                  ? 'وضع الإنتاج الآمن مفعّل: تم تعطيل الدخول التجريبي السريع وإخفاء قائمة الحسابات من الواجهة العامة.'
+                  : 'Production security active: Demo quick-login and public user enumeration are disabled.'}
+              </div>
+            )}
           </div>
 
           {demoLoginEnabled && loginProfiles.length > 0 && (
             <div className="space-y-3 flex-1">
               <div className="p-3 rounded-xl bg-blue-500/15 border border-blue-400/30 text-[11px] text-blue-100 space-y-1">
                 <div className="font-bold">
-                  {isAr ? 'حسابات فريق العمل (لوضع التجربة والتشغيل السريع)' : 'Team Accounts (Quick Demo Sign-In)'}
+                  {isAr ? 'حسابات فريق العمل (وضع التطوير فقط)' : 'Team Accounts (Dev Mode Only)'}
                 </div>
                 <div className="font-mono-num text-blue-200/90" dir="ltr">
                   Password: Aqar@2026 · PIN: 1234
@@ -372,7 +604,7 @@ export function AuthLoginScreen() {
           )}
 
           <div className="pt-3 border-t border-white/10 text-[11px] text-slate-400 flex items-center justify-between">
-            <span>{isAr ? 'متصل بوضع التخزين الآمن' : 'Offline-First Protected'}</span>
+            <span>{isAr ? 'تخزين IndexedDB + SQLite WAL' : 'IndexedDB + SQLite WAL'}</span>
             <span className="font-mono-num">AqarPlus v1.0</span>
           </div>
         </div>

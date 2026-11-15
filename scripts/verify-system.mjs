@@ -33,14 +33,21 @@ async function runTests() {
     assert.equal(healthJson.sqlite.journalMode, 'wal');
     console.log('✓ 1. /api/health confirms SQLite WAL mode is active');
 
-    // 2. Unauthenticated & spoofed x-user-id header must be rejected with 401
+    // 2. Unauthenticated & spoofed x-user-id header must be rejected with 401; Demo Login disabled by default
+    const sessRes = await fetch(`${BASE_URL}/api/auth/session`);
+    assert.equal(sessRes.status, 200);
+    const sessJson = await sessRes.json();
+    assert.equal(sessJson.authenticated, false);
+    assert.equal(sessJson.demoLoginEnabled, false, 'Demo Login must be disabled by default');
+    assert.deepEqual(sessJson.loginProfiles, [], 'Staff profiles must NOT leak when demo login is disabled');
+
     const unauthRes = await fetch(`${BASE_URL}/api/state`);
     assert.equal(unauthRes.status, 401);
     const spoofRes = await fetch(`${BASE_URL}/api/state`, {
-      headers: { 'x-user-id': 'usr-sys_owner' },
+      headers: { 'x-user-id': 'usr-sys' },
     });
     assert.equal(spoofRes.status, 401);
-    console.log('✓ 2. Unauthenticated requests and spoofed x-user-id headers rejected (HTTP 401)');
+    console.log('✓ 2. Demo Login disabled by default, no user enumeration, spoofed headers rejected (401)');
 
     // 3. Invalid password rejected, valid login issues signed token
     const badLogin = await fetch(`${BASE_URL}/api/auth/login`, {
@@ -149,7 +156,17 @@ async function runTests() {
     assert.equal(batchDupJson.uploaded, 0);
     assert.equal(batchDupJson.skippedDuplicates, 1);
 
-    // Trigger revision increment then send stale baseRevision=0 to verify conflict logging
+    // Enable manual_review conflict policy and trigger revision mismatch on tenant edit
+    await fetch(`${BASE_URL}/api/settings`, {
+      method: 'PATCH',
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        syncCenter: {
+          ...(ownerAuth.state.settings.syncCenter || {}),
+          conflictResolution: 'manual_review',
+        },
+      }),
+    });
     const targetTenantId = ownerAuth.state.tenants[0]?.id;
     await fetch(`${BASE_URL}/api/tenants/${targetTenantId}`, {
       method: 'PATCH',
@@ -298,7 +315,77 @@ async function runTests() {
     assert.ok(persistedJson.state.payments.some((p) => p.amount === 750 && p.notes?.includes('اختبار المزامنة')));
     console.log('✓ 8. SQLite WAL persistence verified across server restart (rotated PIN & receipts preserved)');
 
-    console.log('\n✅ ALL 8 END-TO-END VERIFICATION CHECKS PASSED!\n');
+    // 9. Conflict resolution persists cleanly
+    const ownerToken2 = persistedJson.token;
+    const ownerHeaders2 = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${ownerToken2}`,
+    };
+    const pendingConflict = (persistedJson.state.syncConflicts || []).find(
+      (c) => c.entityId === targetTenantId && c.status === 'بانتظار مراجعة المدير'
+    );
+    assert.ok(pendingConflict, 'Pending conflict must persist across restart from step 5');
+    const resolveCnfRes = await fetch(`${BASE_URL_2}/api/team/conflicts/${pendingConflict.id}/resolve`, {
+      method: 'POST',
+      headers: ownerHeaders2,
+      body: JSON.stringify({ resolution: 'تم الإبقاء على النسخة السابقة' }),
+    });
+    assert.equal(resolveCnfRes.status, 200);
+    const resolveCnfJson = await resolveCnfRes.json();
+    assert.equal(resolveCnfJson.conflict.status, 'تم الإبقاء على النسخة السابقة');
+    console.log('✓ 9. Sync conflict resolution persisted');
+
+    // 10. Concurrent multi-device payments + duplicate referenceNumber guard
+    const sharedRef = `TRF-${Date.now()}`;
+    const [pA, pB] = await Promise.all([
+      fetch(`${BASE_URL_2}/api/payments`, {
+        method: 'POST',
+        headers: ownerHeaders2,
+        body: JSON.stringify({
+          idempotencyKey: `multi-dev-a-${Date.now()}`,
+          contractId,
+          amount: 500,
+          paymentMethod: 'تحويل بنكي',
+          paymentType: 'إيجار',
+          referenceNumber: sharedRef,
+        }),
+      }),
+      fetch(`${BASE_URL_2}/api/payments`, {
+        method: 'POST',
+        headers: ownerHeaders2,
+        body: JSON.stringify({
+          idempotencyKey: `multi-dev-b-${Date.now()}`,
+          contractId,
+          amount: 500,
+          paymentMethod: 'تحويل بنكي',
+          paymentType: 'إيجار',
+          referenceNumber: sharedRef,
+        }),
+      }),
+    ]);
+    assert.ok(pA.ok && pB.ok);
+    const stateAfterRef = await fetch(`${BASE_URL_2}/api/state`, { headers: ownerHeaders2 }).then((r) => r.json());
+    const matchingRefPayments = stateAfterRef.state.payments.filter((p) => p.referenceNumber === sharedRef);
+    assert.equal(matchingRefPayments.length, 1, 'Duplicate bank referenceNumber for same contract/amount must be deduplicated');
+    console.log('✓ 10. Multi-device payment & referenceNumber deduplication verified');
+
+    // 11. 5-attempt failed login lockout (HTTP 429)
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await fetch(`${BASE_URL_2}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: 'fahad@aqarplus.sa', password: 'WrongPassword!' }),
+      });
+    }
+    const lockedRes = await fetch(`${BASE_URL_2}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier: 'fahad@aqarplus.sa', password: 'Aqar@2026' }),
+    });
+    assert.equal(lockedRes.status, 429, 'Account must be locked (HTTP 429) after 5 failed attempts');
+    console.log('✓ 11. Brute-force account lockout (5 attempts -> HTTP 429) verified');
+
+    console.log('\n✅ ALL 11 NODE/SQLITE END-TO-END VERIFICATION CHECKS PASSED!\n');
   } finally {
     await new Promise((r) => started.server.close(r));
     fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true });

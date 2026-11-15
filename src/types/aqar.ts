@@ -51,6 +51,7 @@ export type StaffStatusState = 'متصل' | 'مشغول' | 'غير متصل';
 export interface StaffSecurityConfig {
   twoFactorEnabled?: boolean;
   biometricEnabled?: boolean;
+  hasPin?: boolean;
   failedAttempts?: number;
   lockedUntil?: string;
   lastPasswordChangedAt?: string;
@@ -71,6 +72,7 @@ export interface StaffNotificationPrefs {
 
 export interface StaffUser {
   id: string;
+  companyId?: string;
   nameAr: string;
   nameEn: string;
   role: RoleKey;

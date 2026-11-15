@@ -17,7 +17,7 @@ tag = "v1"
 new_sqlite_classes = ["AqarWorkspaceDO"]
 
 [vars]
-AQAR_DEMO_LOGIN = "true"
+AQAR_DEMO_LOGIN = "false"
 
 # Secrets to configure before production deploy:
 # npx wrangler secret put AQAR_SESSION_SECRET

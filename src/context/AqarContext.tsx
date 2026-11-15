@@ -83,11 +83,23 @@ interface AqarContextValue {
   authChecking: boolean;
   isAuthenticated: boolean;
   authToken: string | null;
+  workspaceId: string;
+  setWorkspaceId: (nextWorkspaceId: string) => void;
   demoLoginEnabled: boolean;
   loginProfiles: LoginProfileSummary[];
   companyBranding: CompanyBrandingSummary | null;
-  loginWithPassword: (identifier: string, password: string) => Promise<{ ok: boolean; error?: string }>;
-  loginWithPin: (userId: string, pin: string) => Promise<{ ok: boolean; error?: string }>;
+  loginWithPassword: (identifier: string, password: string, workspaceOverride?: string) => Promise<{ ok: boolean; error?: string }>;
+  loginWithPin: (userId: string, pin: string, workspaceOverride?: string) => Promise<{ ok: boolean; error?: string }>;
+  provisionWorkspace: (params: {
+    workspaceSlug: string;
+    companyNameAr: string;
+    companyNameEn?: string;
+    adminNameAr: string;
+    adminEmail: string;
+    adminPhone?: string;
+    password: string;
+    pin?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
   logout: () => Promise<void>;
   changeCredentials: (params: {
     targetUserId?: string;
@@ -156,10 +168,16 @@ const AqarContext = createContext<AqarContextValue | null>(null);
 
 const USER_STORAGE_KEY = 'aqarplus_active_user_v1';
 const AUTH_TOKEN_STORAGE_KEY = 'aqarplus_auth_token_v1';
+const WORKSPACE_STORAGE_KEY = 'aqarplus_workspace_id_v1';
 const DEVICE_ID_STORAGE_KEY = 'aqarplus_device_id_v1';
 const THEME_STORAGE_KEY = 'aqarplus_theme_v1';
 const LANG_STORAGE_KEY = 'aqarplus_lang_v1';
 const BASE_CURRENCY_STORAGE_KEY = 'aqarplus_base_currency_v1';
+
+function normalizeWorkspaceSlug(raw?: string | null): string {
+  const clean = (raw || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  return clean.length >= 3 && clean.length <= 40 ? clean : 'default';
+}
 
 function getOrCreateDeviceId(): string {
   if (typeof window === 'undefined') return 'server-device';
@@ -178,7 +196,13 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
   const [authToken, setAuthToken] = useState<string | null>(() =>
     typeof window !== 'undefined' ? window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) : null
   );
-  const [demoLoginEnabled, setDemoLoginEnabled] = useState(true);
+  const [workspaceId, setWorkspaceIdState] = useState<string>(() => {
+    if (typeof window === 'undefined') return 'default';
+    const urlWs = new URLSearchParams(window.location.search).get('workspace');
+    if (urlWs) return normalizeWorkspaceSlug(urlWs);
+    return normalizeWorkspaceSlug(window.localStorage.getItem(WORKSPACE_STORAGE_KEY));
+  });
+  const [demoLoginEnabled, setDemoLoginEnabled] = useState(false);
   const [loginProfiles, setLoginProfiles] = useState<LoginProfileSummary[]>([]);
   const [companyBranding, setCompanyBranding] = useState<CompanyBrandingSummary | null>(null);
 
@@ -226,6 +250,8 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
   activeUserIdRef.current = activeUserId;
   const authTokenRef = useRef(authToken);
   authTokenRef.current = authToken;
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
   const stateRef = useRef(state);
   stateRef.current = state;
   const inFlightKeysRef = useRef<Set<string>>(new Set());
@@ -269,6 +295,15 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
     setActiveNavState('tenants');
   }, []);
 
+  const setWorkspaceId = useCallback((nextWorkspaceId: string) => {
+    const clean = normalizeWorkspaceSlug(nextWorkspaceId);
+    workspaceIdRef.current = clean;
+    setWorkspaceIdState(clean);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(WORKSPACE_STORAGE_KEY, clean);
+    }
+  }, []);
+
   const persistAuthToken = useCallback((token: string | null, userId?: string) => {
     setAuthToken(token);
     authTokenRef.current = token;
@@ -291,7 +326,7 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       nameEn: nextState.settings.nameEn,
       logoDataUrl: nextState.settings.logoDataUrl,
     });
-    void saveCachedStateIdb(nextState);
+    void saveCachedStateIdb(nextState, workspaceIdRef.current);
   }, []);
 
   useEffect(() => {
@@ -333,7 +368,7 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!idbReady) return;
-    void replaceOfflineQueueIdb(offlineQueue);
+    void replaceOfflineQueueIdb(offlineQueue, workspaceIdRef.current);
   }, [offlineQueue, idbReady]);
 
   const setLang = useCallback((next: 'ar' | 'en') => {
@@ -411,6 +446,9 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       if (authTokenRef.current && !headers.has('Authorization')) {
         headers.set('Authorization', `Bearer ${authTokenRef.current}`);
       }
+      if (!headers.has('x-workspace-id')) {
+        headers.set('x-workspace-id', workspaceIdRef.current);
+      }
       const res = await fetch(input, {
         ...init,
         credentials: 'include',
@@ -450,16 +488,10 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       cacheStateSnapshot(data.state);
       if (data.presence) setPresence(data.presence);
     } catch {
-      const cached = await loadCachedStateIdb();
-      if (cached) {
+      const cached = await loadCachedStateIdb(workspaceIdRef.current);
+      if (cached && authTokenRef.current) {
         cacheStateSnapshot(cached);
         setWsStatus('offline');
-      } else {
-        setIsStaticMode(true);
-        setWsStatus('offline');
-        const { createInitialSeed } = await import('../../server/seed');
-        const seed = createInitialSeed();
-        cacheStateSnapshot(seed);
       }
     } finally {
       setLoading(false);
@@ -470,25 +502,28 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      const activeWs = workspaceIdRef.current;
       try {
         const { migratedState, migratedQueue } = await migrateLegacyLocalStorageToIdb();
         const [idbState, idbQueue, savedLastSync] = await Promise.all([
-          loadCachedStateIdb(),
-          loadOfflineQueueIdb(),
-          loadMetaIdb<string>('lastSyncAt'),
+          loadCachedStateIdb(activeWs),
+          loadOfflineQueueIdb(activeWs),
+          loadMetaIdb<string>(`lastSyncAt:${activeWs}`),
         ]);
         if (cancelled) return;
-        const effectiveQueue = idbQueue.length > 0 ? idbQueue : migratedQueue;
+        const effectiveQueue = idbQueue.length > 0 ? idbQueue : activeWs === 'default' ? migratedQueue : [];
         setOfflineQueue(effectiveQueue);
         if (savedLastSync) setLastSyncAt(savedLastSync);
-        const cached = idbState || migratedState;
+        const cached = idbState || (activeWs === 'default' ? migratedState : null);
         if (cached) {
           stateRef.current = cached;
         }
         setIdbReady(true);
 
         // Check live session against server/Worker
-        const headers: Record<string, string> = {};
+        const headers: Record<string, string> = {
+          'x-workspace-id': activeWs,
+        };
         if (authTokenRef.current) {
           headers['Authorization'] = `Bearer ${authTokenRef.current}`;
         }
@@ -497,8 +532,20 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
           headers,
         });
         const ct = sessionRes.headers.get('content-type') || '';
-        if (!sessionRes.ok || !ct.includes('application/json')) {
-          throw new Error('Static hosting without API backend');
+        if (sessionRes.status === 404 || !ct.includes('application/json')) {
+          // Pure static hosting without backend API
+          if (cancelled) return;
+          setIsStaticMode(true);
+          setIsAuthenticated(true);
+          if (cached) {
+            cacheStateSnapshot(cached);
+          } else {
+            const { createInitialSeed } = await import('../../server/seed');
+            cacheStateSnapshot(createInitialSeed());
+          }
+          setWsStatus('offline');
+          setLoading(false);
+          return;
         }
         const sessionData = await sessionRes.json();
         if (cancelled) return;
@@ -520,20 +567,16 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
           setLoading(false);
         }
       } catch {
-        // Offline startup or static host (e.g., GitHub Pages)
+        // Offline startup with prior authenticated device session stored in IndexedDB
         if (cancelled) return;
-        const cached = await loadCachedStateIdb();
-        if (cached) {
+        const cached = await loadCachedStateIdb(activeWs);
+        if (cached && authTokenRef.current) {
           cacheStateSnapshot(cached);
           setIsAuthenticated(true);
           setWsStatus('offline');
           setLoading(false);
         } else {
-          setIsStaticMode(true);
-          setIsAuthenticated(true);
-          const { createInitialSeed } = await import('../../server/seed');
-          const seed = createInitialSeed();
-          cacheStateSnapshot(seed);
+          setIsAuthenticated(false);
           setWsStatus('offline');
           setLoading(false);
         }
@@ -554,12 +597,21 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
   }, [fetchState]);
 
   const loginWithPassword = useCallback(
-    async (identifier: string, password: string): Promise<{ ok: boolean; error?: string }> => {
+    async (
+      identifier: string,
+      password: string,
+      workspaceOverride?: string
+    ): Promise<{ ok: boolean; error?: string }> => {
       try {
+        const wsTarget = workspaceOverride ? normalizeWorkspaceSlug(workspaceOverride) : workspaceIdRef.current;
+        if (workspaceOverride) setWorkspaceId(wsTarget);
         const res = await fetch('/api/auth/login', {
           method: 'POST',
           credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-workspace-id': wsTarget,
+          },
           body: JSON.stringify({
             identifier,
             password,
@@ -584,18 +636,28 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
         return { ok: false, error: 'تعذر الوصول إلى الخادم لتسجيل الدخول' };
       }
     },
-    [cacheStateSnapshot, fetchState, persistAuthToken]
+    [cacheStateSnapshot, fetchState, persistAuthToken, setWorkspaceId]
   );
 
   const loginWithPin = useCallback(
-    async (userId: string, pin: string): Promise<{ ok: boolean; error?: string }> => {
+    async (
+      userId: string,
+      pin: string,
+      workspaceOverride?: string
+    ): Promise<{ ok: boolean; error?: string }> => {
       try {
+        const wsTarget = workspaceOverride ? normalizeWorkspaceSlug(workspaceOverride) : workspaceIdRef.current;
+        if (workspaceOverride) setWorkspaceId(wsTarget);
         const res = await fetch('/api/auth/login-pin', {
           method: 'POST',
           credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-workspace-id': wsTarget,
+          },
           body: JSON.stringify({
             userId,
+            identifier: userId,
             pin,
             deviceName: typeof navigator !== 'undefined' ? navigator.platform || 'Web Terminal' : 'Web Terminal',
           }),
@@ -618,7 +680,53 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
         return { ok: false, error: 'تعذر الوصول إلى الخادم للتحقق من الرمز' };
       }
     },
-    [cacheStateSnapshot, fetchState, persistAuthToken]
+    [cacheStateSnapshot, fetchState, persistAuthToken, setWorkspaceId]
+  );
+
+  const provisionWorkspace = useCallback(
+    async (params: {
+      workspaceSlug: string;
+      companyNameAr: string;
+      companyNameEn?: string;
+      adminNameAr: string;
+      adminEmail: string;
+      adminPhone?: string;
+      password: string;
+      pin?: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const cleanSlug = normalizeWorkspaceSlug(params.workspaceSlug);
+        if (cleanSlug === 'default') {
+          return { ok: false, error: 'اختر معرّف شركة مخصصاً (3 أحرف إنجليزية وأرقام على الأقل)' };
+        }
+        const res = await fetch('/api/workspaces/provision', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-workspace-id': cleanSlug,
+          },
+          body: JSON.stringify({
+            ...params,
+            deviceName: typeof navigator !== 'undefined' ? navigator.platform || 'Web Terminal' : 'Web Terminal',
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return { ok: false, error: data?.error || 'تعذر تأسيس مساحة عمل الشركة' };
+        }
+        setWorkspaceId(cleanSlug);
+        persistAuthToken(data.token || null, data.user?.id);
+        setIsAuthenticated(true);
+        setIsStaticMode(false);
+        if (data.state) cacheStateSnapshot(data.state);
+        setLoading(false);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'تعذر الاتصال بالخادم السحابي لتأسيس مساحة العمل' };
+      }
+    },
+    [cacheStateSnapshot, persistAuthToken, setWorkspaceId]
   );
 
   const logout = useCallback(async () => {
@@ -683,7 +791,7 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       if (closedByUser) return;
       setWsStatus('connecting');
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${proto}//${window.location.host}/ws`);
+      const ws = new WebSocket(`${proto}//${window.location.host}/ws?workspace=${encodeURIComponent(workspaceIdRef.current)}`);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -814,10 +922,11 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       const result = await SyncEngine.uploadPendingOperations(
         offlineQueue,
         stateRef.current?.lastUpdatedAt,
-        authTokenRef.current
+        authTokenRef.current,
+        workspaceIdRef.current
       );
       setLastSyncAt(result.syncedAt);
-      void saveMetaIdb('lastSyncAt', result.syncedAt);
+      void saveMetaIdb(`lastSyncAt:${workspaceIdRef.current}`, result.syncedAt);
       setLastSyncResult(result);
       if (result.state) cacheStateSnapshot(result.state);
       if (result.errors.length === 0) {
@@ -850,19 +959,24 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       const uploadResult = await SyncEngine.uploadPendingOperations(
         offlineQueue,
         stateRef.current?.lastUpdatedAt,
-        authTokenRef.current
+        authTokenRef.current,
+        workspaceIdRef.current
       );
       if (uploadResult.errors.length === 0 && offlineQueue.length > 0) {
         setOfflineQueue([]);
       }
-      const delta = await SyncEngine.fetchDelta(lastSyncAt || undefined, authTokenRef.current);
+      const delta = await SyncEngine.fetchDelta(
+        lastSyncAt || undefined,
+        authTokenRef.current,
+        workspaceIdRef.current
+      );
       if (delta.state) {
         cacheStateSnapshot(delta.state);
       } else if (uploadResult.state) {
         cacheStateSnapshot(uploadResult.state);
       }
       setLastSyncAt(uploadResult.syncedAt);
-      void saveMetaIdb('lastSyncAt', uploadResult.syncedAt);
+      void saveMetaIdb(`lastSyncAt:${workspaceIdRef.current}`, uploadResult.syncedAt);
       setLastSyncResult(uploadResult);
       pushToast(
         'success',
@@ -1017,7 +1131,44 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
         if (data.state) cacheStateSnapshot(data.state);
         return data as T;
       } catch {
-        pushToast('error', lang === 'ar' ? 'تعذر الاتصال بالخادم المركزي' : 'Cannot reach central server');
+        const target = extractEntityTarget(endpoint, body);
+        const revKey = target.entityType && target.entityId ? `${target.entityType}:${target.entityId}` : undefined;
+        const baseRevision = revKey ? stateRef.current?.entityRevisions?.[revKey] : undefined;
+        const queued: OfflineQueuedAction = {
+          id: `off-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          operationId,
+          idempotencyKey: operationId,
+          method,
+          endpoint,
+          body,
+          entityType: target.entityType,
+          entityId: target.entityId,
+          baseRevision,
+          deviceId: deviceIdRef.current,
+          descriptionAr: opts?.offlineDescAr || 'عملية معلقة عند انقطاع الخادم',
+          descriptionEn: opts?.offlineDescEn || 'Queued offline mutation',
+          queuedAt: new Date().toISOString(),
+          userId: activeUserIdRef.current,
+          deviceName,
+        };
+        setOfflineQueue((prev) => [...prev, queued]);
+        if (stateRef.current && actorObj) {
+          const optimisticState = applyOptimisticOfflineMutation(
+            stateRef.current,
+            method,
+            endpoint,
+            body,
+            actorObj,
+            operationId
+          );
+          cacheStateSnapshot(optimisticState);
+        }
+        pushToast(
+          'info',
+          lang === 'ar'
+            ? 'انقطع الاتصال بالخادم — تم حفظ العملية في IndexedDB للمزامنة التلقائية'
+            : 'Network unavailable — operation saved to IndexedDB for auto-sync'
+        );
         return null;
       } finally {
         inFlightKeysRef.current.delete(operationId);
@@ -1034,11 +1185,14 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       authChecking,
       isAuthenticated,
       authToken,
+      workspaceId,
+      setWorkspaceId,
       demoLoginEnabled,
       loginProfiles,
       companyBranding,
       loginWithPassword,
       loginWithPin,
+      provisionWorkspace,
       logout,
       changeCredentials,
       apiFetch,
@@ -1094,11 +1248,14 @@ export function AqarProvider({ children }: { children: React.ReactNode }) {
       authChecking,
       isAuthenticated,
       authToken,
+      workspaceId,
+      setWorkspaceId,
       demoLoginEnabled,
       loginProfiles,
       companyBranding,
       loginWithPassword,
       loginWithPin,
+      provisionWorkspace,
       logout,
       changeCredentials,
       apiFetch,

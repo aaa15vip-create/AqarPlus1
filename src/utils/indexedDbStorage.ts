@@ -12,6 +12,10 @@ const LEGACY_QUEUE_KEY = 'aqarplus_offline_queue_v1';
 
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
+function snapshotKeyFor(workspaceId = 'default'): string {
+  return workspaceId === 'default' ? 'latest_state' : `latest_state:${workspaceId}`;
+}
+
 function openDb(): Promise<IDBDatabase | null> {
   if (typeof window === 'undefined' || !('indexedDB' in window)) {
     return Promise.resolve(null);
@@ -65,19 +69,19 @@ async function withStore<T>(
   });
 }
 
-export async function loadCachedStateIdb(): Promise<AqarDatabaseState | null> {
+export async function loadCachedStateIdb(workspaceId = 'default'): Promise<AqarDatabaseState | null> {
   const val = await withStore<AqarDatabaseState>(STORE_SNAPSHOTS, 'readonly', (s) =>
-    s.get('latest_state')
+    s.get(snapshotKeyFor(workspaceId))
   );
   if (val && Array.isArray(val.properties)) return val;
   return null;
 }
 
-export async function saveCachedStateIdb(state: AqarDatabaseState): Promise<void> {
-  await withStore(STORE_SNAPSHOTS, 'readwrite', (s) => s.put(state, 'latest_state'));
+export async function saveCachedStateIdb(state: AqarDatabaseState, workspaceId = 'default'): Promise<void> {
+  await withStore(STORE_SNAPSHOTS, 'readwrite', (s) => s.put(state, snapshotKeyFor(workspaceId)));
 }
 
-export async function loadOfflineQueueIdb(): Promise<OfflineQueuedAction[]> {
+export async function loadOfflineQueueIdb(workspaceId = 'default'): Promise<OfflineQueuedAction[]> {
   const db = await openDb();
   if (!db) return [];
   return new Promise((resolve) => {
@@ -86,7 +90,9 @@ export async function loadOfflineQueueIdb(): Promise<OfflineQueuedAction[]> {
       const store = tx.objectStore(STORE_QUEUE);
       const req = store.getAll();
       req.onsuccess = () => {
-        const rows = (req.result as OfflineQueuedAction[] | undefined) || [];
+        const rows = ((req.result as (OfflineQueuedAction & { workspaceId?: string })[] | undefined) || []).filter(
+          (r) => (r.workspaceId || 'default') === workspaceId
+        );
         rows.sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
         resolve(rows);
       };
@@ -97,17 +103,25 @@ export async function loadOfflineQueueIdb(): Promise<OfflineQueuedAction[]> {
   });
 }
 
-export async function replaceOfflineQueueIdb(queue: OfflineQueuedAction[]): Promise<void> {
+export async function replaceOfflineQueueIdb(queue: OfflineQueuedAction[], workspaceId = 'default'): Promise<void> {
   const db = await openDb();
   if (!db) return;
   await new Promise<void>((resolve) => {
     try {
       const tx = db.transaction(STORE_QUEUE, 'readwrite');
       const store = tx.objectStore(STORE_QUEUE);
-      store.clear();
-      for (const item of queue) {
-        store.put(item);
-      }
+      const getReq = store.getAll();
+      getReq.onsuccess = () => {
+        const all = (getReq.result as (OfflineQueuedAction & { workspaceId?: string })[] | undefined) || [];
+        const otherWorkspaces = all.filter((item) => (item.workspaceId || 'default') !== workspaceId);
+        store.clear();
+        for (const item of otherWorkspaces) {
+          store.put(item);
+        }
+        for (const item of queue) {
+          store.put({ ...item, workspaceId });
+        }
+      };
       tx.oncomplete = () => resolve();
       tx.onerror = () => resolve();
     } catch {
@@ -130,6 +144,52 @@ export async function saveAttachmentIdb(id: string, dataUrl: string, mimeType?: 
   );
 }
 
+export async function getIdbStorageDiagnostics(workspaceId = 'default'): Promise<{
+  supported: boolean;
+  dbName: string;
+  hasCachedSnapshot: boolean;
+  queuedCount: number;
+  attachmentsCount: number;
+  usageKb?: number;
+  quotaKb?: number;
+}> {
+  const db = await openDb();
+  if (!db) {
+    return {
+      supported: false,
+      dbName: DB_NAME,
+      hasCachedSnapshot: false,
+      queuedCount: 0,
+      attachmentsCount: 0,
+    };
+  }
+  const [snap, queue, attCount] = await Promise.all([
+    loadCachedStateIdb(workspaceId),
+    loadOfflineQueueIdb(workspaceId),
+    withStore<number>(STORE_ATTACHMENTS, 'readonly', (s) => s.count()),
+  ]);
+  let usageKb: number | undefined;
+  let quotaKb: number | undefined;
+  if (typeof navigator !== 'undefined' && navigator.storage?.estimate) {
+    try {
+      const est = await navigator.storage.estimate();
+      if (typeof est.usage === 'number') usageKb = Math.round(est.usage / 1024);
+      if (typeof est.quota === 'number') quotaKb = Math.round(est.quota / 1024);
+    } catch {
+      // ignore estimate error
+    }
+  }
+  return {
+    supported: true,
+    dbName: DB_NAME,
+    hasCachedSnapshot: Boolean(snap),
+    queuedCount: queue.length,
+    attachmentsCount: attCount || 0,
+    usageKb,
+    quotaKb,
+  };
+}
+
 /**
  * One-time safe migration of legacy localStorage snapshots/queues into IndexedDB
  * to eliminate 5MB QuotaExceededError data loss.
@@ -150,9 +210,9 @@ export async function migrateLegacyLocalStorageToIdb(): Promise<{
     if (rawState) {
       const parsed = JSON.parse(rawState) as AqarDatabaseState;
       if (parsed && Array.isArray(parsed.properties)) {
-        const existing = await loadCachedStateIdb();
+        const existing = await loadCachedStateIdb('default');
         if (!existing) {
-          await saveCachedStateIdb(parsed);
+          await saveCachedStateIdb(parsed, 'default');
         }
         migratedState = parsed;
       }
@@ -167,7 +227,7 @@ export async function migrateLegacyLocalStorageToIdb(): Promise<{
     if (rawQueue) {
       const parsedQueue = JSON.parse(rawQueue) as OfflineQueuedAction[];
       if (Array.isArray(parsedQueue) && parsedQueue.length > 0) {
-        const existingQueue = await loadOfflineQueueIdb();
+        const existingQueue = await loadOfflineQueueIdb('default');
         const normalized = parsedQueue.map((item) => ({
           ...item,
           operationId: item.operationId || item.idempotencyKey || item.id,
@@ -179,7 +239,7 @@ export async function migrateLegacyLocalStorageToIdb(): Promise<{
             merged.push(item);
           }
         }
-        await replaceOfflineQueueIdb(merged);
+        await replaceOfflineQueueIdb(merged, 'default');
         migratedQueue = merged;
       }
       window.localStorage.removeItem(LEGACY_QUEUE_KEY);

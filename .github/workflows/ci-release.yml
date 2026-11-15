@@ -1,0 +1,111 @@
+name: AqarPlus CI, Windows EXE & Cloudflare Deploy
+
+on:
+  push:
+    branches-ignore:
+      - gh-pages
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Typecheck, Build & End-to-End Tests (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies cleanly (unified npm lockfile)
+        run: npm ci
+
+      - name: Typecheck frontend & Node server
+        run: npm run typecheck
+
+      - name: Typecheck Cloudflare Worker & Durable Object
+        run: npm run typecheck:worker
+
+      - name: Build Web PWA + Node/Electron Server + Cloudflare Worker
+        run: |
+          npm run build:desktop
+          npm run build:worker
+
+      - name: Run full verification suite (SQLite WAL, Auth, RBAC, Sync, Worker DO, IndexedDB)
+        run: npm test
+
+  build-windows:
+    name: Build Windows EXE Installer (NSIS + Portable)
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies cleanly
+        run: npm ci
+
+      - name: Build Desktop Frontend, Server & Windows EXE
+        run: npm run dist:win
+
+      - name: Upload Windows EXE Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AqarPlus-Windows-EXE
+          path: |
+            release/*.exe
+            release/*.blockmap
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy-cloudflare:
+    name: Deploy to Cloudflare Workers
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && secrets.CLOUDFLARE_API_TOKEN != ''
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies cleanly
+        run: npm ci
+
+      - name: Verify Demo Login is disabled in wrangler.toml
+        run: |
+          if grep -q 'AQAR_DEMO_LOGIN = "true"' wrangler.toml; then
+            echo "ERROR: AQAR_DEMO_LOGIN must be false before public Cloudflare deploy"
+            exit 1
+          fi
+
+      - name: Build Web PWA & Worker Bundle
+        run: |
+          npm run build
+          npm run build:worker
+
+      - name: Deploy Worker & Static Assets via Wrangler
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy

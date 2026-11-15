@@ -186,9 +186,16 @@ export class AqarStore {
     if (!user.active) {
       throw new Error('تم إيقاف هذا الحساب من قِبل الإدارة');
     }
+    if (user.security?.lockedUntil && new Date(user.security.lockedUntil).getTime() > Date.now()) {
+      const waitSec = Math.ceil((new Date(user.security.lockedUntil).getTime() - Date.now()) / 1000);
+      throw new Error(`تم قفل الحساب مؤقتاً لكثرة المحاولات الخاطئة. حاول بعد ${waitSec} ثانية.`);
+    }
     if (!this.sqlite.verifyUserPassword(user.id, password)) {
       if (!user.security) user.security = {};
       user.security.failedAttempts = (user.security.failedAttempts || 0) + 1;
+      if (user.security.failedAttempts >= 5) {
+        user.security.lockedUntil = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      }
       this.recordLoginEvent({
         userId: user.id,
         deviceName: deviceName || user.deviceName,
@@ -200,6 +207,7 @@ export class AqarStore {
     }
     if (user.security) {
       user.security.failedAttempts = 0;
+      user.security.lockedUntil = undefined;
     }
     user.statusState = 'متصل';
     this.recordLoginEvent({
@@ -212,14 +220,24 @@ export class AqarStore {
     return user;
   }
 
-  public authenticatePin(userId: string, pin: string, deviceName?: string): StaffUser {
-    const user = this.state.users.find((u) => u.id === userId);
+  public authenticatePin(userIdOrIdentifier: string, pin: string, deviceName?: string): StaffUser {
+    const norm = (userIdOrIdentifier || '').trim().toLowerCase();
+    const user = this.state.users.find(
+      (u) => u.id.toLowerCase() === norm || u.email.toLowerCase() === norm || u.phone === userIdOrIdentifier.trim()
+    );
     if (!user || !user.active) {
       throw new Error('الحساب غير متاح أو موقوف');
+    }
+    if (user.security?.lockedUntil && new Date(user.security.lockedUntil).getTime() > Date.now()) {
+      const waitSec = Math.ceil((new Date(user.security.lockedUntil).getTime() - Date.now()) / 1000);
+      throw new Error(`تم قفل الحساب مؤقتاً لكثرة المحاولات الخاطئة. حاول بعد ${waitSec} ثانية.`);
     }
     if (!this.sqlite.verifyUserPin(user.id, pin)) {
       if (!user.security) user.security = {};
       user.security.failedAttempts = (user.security.failedAttempts || 0) + 1;
+      if (user.security.failedAttempts >= 5) {
+        user.security.lockedUntil = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      }
       this.recordLoginEvent({
         userId: user.id,
         deviceName: deviceName || user.deviceName,
@@ -231,6 +249,7 @@ export class AqarStore {
     }
     if (user.security) {
       user.security.failedAttempts = 0;
+      user.security.lockedUntil = undefined;
     }
     user.statusState = 'متصل';
     this.recordLoginEvent({
@@ -1210,6 +1229,13 @@ export class AqarStore {
       const existing = this.state.payments.find((p) => p.idempotencyKey === input.idempotencyKey);
       if (existing) return existing;
     }
+    const cleanRef = input.referenceNumber ? input.referenceNumber.trim() : '';
+    if (cleanRef) {
+      const dupRef = this.state.payments.find(
+        (p) => p.contractId === input.contractId && p.referenceNumber === cleanRef && p.amount === input.amount && p.status === 'معتمد'
+      );
+      if (dupRef) return dupRef;
+    }
 
     if (!input.amount || input.amount <= 0) throw new Error('يجب أن يكون المبلغ أكبر من صفر');
 
@@ -1289,6 +1315,7 @@ export class AqarStore {
 
     this.state.payments.unshift(payment);
     this.state.processedIdempotencyKeys.push(input.idempotencyKey);
+    this.idempotencyIndex.add(input.idempotencyKey);
 
     // Update unit overdue flag if all overdue installments cleared
     if (unit && unit.status === 'متأخرة في السداد') {

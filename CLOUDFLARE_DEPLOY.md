@@ -1,40 +1,34 @@
-# دليل نشر AqarPlus على Cloudflare Workers (مجاني + رابط ثابت)
+# دليل نشر AqarPlus على Cloudflare Workers (مجاني + معزول للشركات)
 
 ## البنية المعتمدة
-يستخدم التطبيق على Cloudflare Workers:
-- **Static Assets (`./dist`)**: واجهة React + Tailwind + PWA Service Worker (`vite-plugin-pwa`) للعمل دون إنترنت.
-- **Durable Object SQLite (`AqarWorkspaceDO`)**: قاعدة بيانات SQLite مدمجة داخل Durable Object (`new_sqlite_classes` في `wrangler.toml`) لحفظ العقارات، العقود، السندات، الجلسات، الاعتمادات، وسجل العمليات (`operations_log`).
+- **Static Assets (`./dist`)**: واجهة React + Tailwind + PWA Service Worker (`vite-plugin-pwa`) + تخزين IndexedDB معزول لكل شركة (`workspaceId`).
+- **Durable Object SQLite المعزول (`AqarWorkspaceDO`)**: يتم توجيه كل شركة إلى Durable Object مستقل (`idFromName("ws:<workspaceId>")`) يحتوي على جداول SQLite مُنظمة (`meta`, `entities`, `user_credentials`, `sessions`, `operations_log`, `backups_store`) وفق `new_sqlite_classes` في `wrangler.toml`.
+- **حماية الإنتاج الافتراضية**:
+  - `AQAR_DEMO_LOGIN = "false"` افتراضياً (إخفاء قائمة الحسابات وأزرار الدخول التجريبي).
+  - ربط التوقيع الأمني `HMAC-SHA256` بمعرّف الشركة `wid` لمنع استخدام جلسة شركة للوصول إلى شركة أخرى.
+  - قفل الحساب مؤقتاً (5 دقائق) بعد 5 محاولات فاشلة لكلمة المرور أو رمز PIN.
 - **WebSocket Hibernation API**: مزامنة لحظية متعددة الأجهزة دون استهلاك CPU عند السكون.
-- **المصادقة والتشفير**: دوال WebCrypto القياسية (`PBKDF2-SHA256`، `HMAC-SHA256`، `AES-256-GCM`) بدون أي اعتماديات Node-only.
 
-## حدود الباقة المجانية (Cloudflare Workers Free Tier)
-- متاح على الباقة المجانية (Workers + Durable Objects SQLite) ضمن حصص الاستهلاك اليومية المجانية (100,000 طلب/يوم).
-- تخزين الملفات الكبيرة في **Cloudflare R2** (10 GB مجانية شهرياً) يتطلب إضافة وسيلة دفع في لوحة Cloudflare Billing حتى بدون رسوم، ولذلك تم إبقاؤه اختيارياً ومعلقاً في `wrangler.toml`.
-
-## خطوات النشر من جهازك أو عبر CI
+## خطوات النشر الفعلي على `workers.dev`
 ```bash
-# 1. تثبيت Wrangler وتسجيل الدخول بحساب Cloudflare
-npm install --save-dev wrangler
-npx wrangler login
-
-# 2. ضبط أسرار البيئة الآمنة
-npx wrangler secret put AQAR_SESSION_SECRET
-# (اختياري لميزة OCR)
-npx wrangler secret put GEMINI_API_KEY
-
-# 3. تعطيل أزرار الدخول التجريبي السريع في الإنتاج الفعلي (تعديل wrangler.toml):
-# AQAR_DEMO_LOGIN = "false"
-
-# 4. بناء الواجهة والـ Worker والنشر على رابط *.workers.dev الثابت
-npm run build
-npm run build:worker
-npx wrangler deploy
-```
-
-## التحقق المحلي قبل النشر
-```bash
+# 1. تثبيت الاعتماديات وتوليد الحزم
+npm ci
 npm run typecheck
 npm run typecheck:worker
 npm run build
 npm run build:worker
+
+# 2. تسجيل الدخول بحساب Cloudflare وضبط سر التوقيع
+npx wrangler login
+npx wrangler secret put AQAR_SESSION_SECRET
+# (اختياري لميزة OCR)
+npx wrangler secret put GEMINI_API_KEY
+
+# 3. النشر الفعلي على الرابط الثابت *.workers.dev
+npx wrangler deploy
 ```
+
+## النشر التلقائي عبر GitHub Actions
+يحتوي `.github/workflows/ci-release.yml` على مسار نشر آلي يتحقق من تعطيل `AQAR_DEMO_LOGIN` ثم ينشر عبر `cloudflare/wrangler-action@v3` فور ضبط الأسرار التالية في GitHub Repository Secrets:
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`

@@ -236,7 +236,7 @@ function handleApi(app: express.Express) {
   // Authentication & Session Endpoints
   app.get('/api/auth/session', (req: Request, res: Response) => {
     const settings = store.getState().settings;
-    const demoLoginEnabled = process.env.AQAR_DEMO_LOGIN !== 'false';
+    const demoLoginEnabled = process.env.AQAR_DEMO_LOGIN === 'true';
     const companyBranding = {
       nameAr: settings.nameAr,
       nameEn: settings.nameEn,
@@ -282,13 +282,14 @@ function handleApi(app: express.Express) {
         state: store.getStateForUser(user.id),
       });
     } catch (e: unknown) {
-      res.status(401).json({ error: (e as Error).message });
+      const msg = (e as Error).message;
+      res.status(msg.includes('قفل الحساب') ? 429 : 401).json({ error: msg });
     }
   });
 
   app.post('/api/auth/login-pin', (req: Request, res: Response) => {
     try {
-      const userId = String(req.body?.userId || 'usr-sys_owner');
+      const userId = String(req.body?.userId || req.body?.identifier || '');
       const pin = String(req.body?.pin || '');
       const deviceName = req.body?.deviceName ? String(req.body.deviceName) : 'Web Terminal';
       const user = store.authenticatePin(userId, pin, deviceName);
@@ -302,7 +303,8 @@ function handleApi(app: express.Express) {
         state: store.getStateForUser(user.id),
       });
     } catch (e: unknown) {
-      res.status(401).json({ error: (e as Error).message });
+      const msg = (e as Error).message;
+      res.status(msg.includes('قفل') ? 429 : 401).json({ error: msg });
     }
   });
 

@@ -89,6 +89,7 @@ export async function verifySecretWeb(secret: string, storedHash: string): Promi
 export interface WorkerSessionClaims {
   sid: string;
   uid: string;
+  wid?: string;
   role: string;
   deviceName?: string;
   iat: number;

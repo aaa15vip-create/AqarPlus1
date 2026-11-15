@@ -1,15 +1,22 @@
 node_modules/
 dist/
 dist-server/
+dist-worker/
 release/
 .wrangler/
 .env
 .env.local
+*.log
+*.zip
+.DS_Store
+
+# Operational runtime data, SQLite databases, backups, archives, and uploaded documents
+data/
 data/*.sqlite
 data/*.sqlite-wal
 data/*.sqlite-shm
 data/*.migrated.bak
-data/backups/*.json
-data/backups/*.enc.json
-*.log
-.DS_Store
+data/*.json
+data/backups/
+data/archive/
+data/documents/

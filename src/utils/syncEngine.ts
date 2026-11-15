@@ -24,7 +24,8 @@ export class SyncEngine {
   static async uploadPendingOperations(
     queue: OfflineQueuedAction[],
     baseLastUpdatedAt?: string,
-    authToken?: string | null
+    authToken?: string | null,
+    workspaceId = 'default'
   ): Promise<SyncBatchUploadResult> {
     if (queue.length === 0) {
       return {
@@ -41,6 +42,7 @@ export class SyncEngine {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'x-device-name': encodeURIComponent(queue[0].deviceName || 'Web Terminal'),
+      'x-workspace-id': workspaceId,
     };
     if (authToken) {
       headers['Authorization'] = `Bearer ${authToken}`;
@@ -78,10 +80,13 @@ export class SyncEngine {
 
   static async fetchDelta(
     sinceIso?: string,
-    authToken?: string | null
+    authToken?: string | null,
+    workspaceId = 'default'
   ): Promise<SyncDeltaResponse> {
     const query = sinceIso ? `?since=${encodeURIComponent(sinceIso)}` : '';
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = {
+      'x-workspace-id': workspaceId,
+    };
     if (authToken) {
       headers['Authorization'] = `Bearer ${authToken}`;
     }
